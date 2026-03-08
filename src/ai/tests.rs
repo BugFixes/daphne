@@ -1,35 +1,16 @@
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::domain::{Bug, NotificationProvider, Severity, TicketProvider};
+use crate::domain::{Bug, Severity};
 
-use super::ProviderRegistry;
-
-#[test]
-fn registry_returns_expected_ticketing_provider() {
-    let registry = ProviderRegistry::default();
-    let provider = registry
-        .ticketing(TicketProvider::Jira)
-        .expect("jira provider");
-
-    assert_eq!(provider.kind(), TicketProvider::Jira);
-}
-
-#[test]
-fn registry_returns_expected_notification_provider() {
-    let registry = ProviderRegistry::default();
-    let provider = registry
-        .notifications(NotificationProvider::Slack)
-        .expect("slack provider");
-
-    assert_eq!(provider.kind(), NotificationProvider::Slack);
-}
+use super::AiRegistry;
 
 #[tokio::test]
-async fn ai_advisor_returns_timeout_guidance() {
-    let registry = ProviderRegistry::default();
+async fn default_ai_advisor_returns_timeout_guidance() {
+    let registry = AiRegistry::default();
     let recommendation = registry
-        .ai()
+        .default_advisor()
+        .expect("default advisor")
         .recommend_fix(
             &Bug {
                 id: Uuid::new_v4(),

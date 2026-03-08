@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use bugfixes::{
-    api, config::Config, providers::ProviderRegistry, repository::Repository,
-    service::IntakeService,
+    ai::AiRegistry, api, config::Config, notifications::NotificationRegistry,
+    repository::Repository, service::IntakeService, ticketing::TicketingRegistry,
 };
 
 #[tokio::main]
@@ -13,8 +13,15 @@ async fn main() -> bugfixes::AppResult<()> {
 
     let config = Config::from_env()?;
     let repository = Arc::new(Repository::connect(&config).await?);
-    let providers = Arc::new(ProviderRegistry::default());
-    let intake_service = Arc::new(IntakeService::new(repository.clone(), providers));
+    let ticketing = Arc::new(TicketingRegistry::default());
+    let notifications = Arc::new(NotificationRegistry::default());
+    let ai = Arc::new(AiRegistry::default());
+    let intake_service = Arc::new(IntakeService::new(
+        repository.clone(),
+        ticketing,
+        notifications,
+        ai,
+    ));
 
     let app = api::router(repository, intake_service);
     let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;

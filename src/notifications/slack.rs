@@ -2,7 +2,7 @@ use async_trait::async_trait;
 
 use crate::{AppResult, domain::NotificationProvider};
 
-use super::{NotificationProviderClient, NotificationRequest};
+use super::{NotificationProviderClient, NotificationRequest, log_stub_notification};
 
 pub struct SlackProvider;
 
@@ -13,14 +13,7 @@ impl NotificationProviderClient for SlackProvider {
     }
 
     async fn send(&self, request: NotificationRequest) -> AppResult<()> {
-        tracing::info!(
-            provider = %self.kind(),
-            account_id = %request.account.id,
-            bug_id = %request.bug.id,
-            severity = %request.severity,
-            "sent stub notification: {}",
-            request.message
-        );
+        log_stub_notification(self.kind(), &request);
         Ok(())
     }
 }

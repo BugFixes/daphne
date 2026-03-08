@@ -1,9 +1,11 @@
+pub mod ai;
 pub mod api;
 pub mod config;
 pub mod domain;
-pub mod providers;
+pub mod notifications;
 pub mod repository;
 pub mod service;
+pub mod ticketing;
 
 use axum::{
     Json,

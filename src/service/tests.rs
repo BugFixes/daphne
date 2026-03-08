@@ -3,13 +3,15 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::{
+    ai::AiRegistry,
     config::Config,
     domain::{
         CreateAccountRequest, CreateAgentRequest, NotificationProvider, Severity,
         StacktraceEventRequest, TicketAction, TicketPriority, TicketProvider,
     },
-    providers::ProviderRegistry,
+    notifications::NotificationRegistry,
     repository::Repository,
+    ticketing::TicketingRegistry,
 };
 
 use super::IntakeService;
@@ -23,8 +25,10 @@ async fn test_service() -> IntakeService {
         .await
         .expect("repository"),
     );
-    let providers = Arc::new(ProviderRegistry::default());
-    IntakeService::new(repository, providers)
+    let ticketing = Arc::new(TicketingRegistry::default());
+    let notifications = Arc::new(NotificationRegistry::default());
+    let ai = Arc::new(AiRegistry::default());
+    IntakeService::new(repository, ticketing, notifications, ai)
 }
 
 #[tokio::test]
