@@ -70,6 +70,7 @@ impl FromStr for Severity {
 #[serde(rename_all = "snake_case")]
 pub enum TicketProvider {
     Jira,
+    Github,
     Linear,
     Tracklines,
 }
@@ -78,6 +79,7 @@ impl fmt::Display for TicketProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Jira => "jira",
+            Self::Github => "github",
             Self::Linear => "linear",
             Self::Tracklines => "tracklines",
         };
@@ -91,6 +93,7 @@ impl FromStr for TicketProvider {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "jira" => Ok(Self::Jira),
+            "github" => Ok(Self::Github),
             "linear" => Ok(Self::Linear),
             "tracklines" => Ok(Self::Tracklines),
             _ => Err(AppError::Validation(format!(

@@ -6,29 +6,39 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AppResult,
+    ai::AiRegistry,
     domain::{
         Account, Bug, NotificationOutcome, Severity, StacktraceEventRequest, Ticket, TicketAction,
         TicketPriority,
     },
-    providers::{
-        NotificationRequest, ProviderRegistry, TicketCommentRequest, TicketCreateRequest,
-        TicketPriorityRequest, build_escalation_comment, build_notification_message,
-        build_repeat_comment,
-    },
+    notifications::{NotificationRegistry, NotificationRequest, build_notification_message},
     repository::{CreateBugRecord, CreateTicketRecord, Repository},
+    ticketing::{
+        TicketCommentRequest, TicketCreateRequest, TicketPriorityRequest, TicketingRegistry,
+        build_escalation_comment, build_repeat_comment,
+    },
 };
 
 #[derive(Clone)]
 pub struct IntakeService {
     repository: Arc<Repository>,
-    providers: Arc<ProviderRegistry>,
+    ticketing: Arc<TicketingRegistry>,
+    notifications: Arc<NotificationRegistry>,
+    ai: Arc<AiRegistry>,
 }
 
 impl IntakeService {
-    pub fn new(repository: Arc<Repository>, providers: Arc<ProviderRegistry>) -> Self {
+    pub fn new(
+        repository: Arc<Repository>,
+        ticketing: Arc<TicketingRegistry>,
+        notifications: Arc<NotificationRegistry>,
+        ai: Arc<AiRegistry>,
+    ) -> Self {
         Self {
             repository,
-            providers,
+            ticketing,
+            notifications,
+            ai,
         }
     }
 
@@ -110,8 +120,8 @@ impl IntakeService {
 
         let (ticket_action, ticket, ai_recommendation) = if account.create_tickets {
             let recommendation = self
-                .providers
-                .ai()
+                .ai
+                .default_advisor()?
                 .recommend_fix(&bug, &request.stacktrace)
                 .await?;
             let ticket = self
@@ -186,8 +196,8 @@ impl IntakeService {
 
         if ticket.is_none() && account.create_tickets {
             let recommendation = self
-                .providers
-                .ai()
+                .ai
+                .default_advisor()?
                 .recommend_fix(&bug, &request.stacktrace)
                 .await?;
             let created_ticket = self
@@ -207,7 +217,7 @@ impl IntakeService {
             if recent_count >= account.rapid_occurrence_threshold {
                 let next_priority = existing_ticket.priority.escalated();
                 if next_priority != existing_ticket.priority {
-                    let provider = self.providers.ticketing(existing_ticket.provider)?;
+                    let provider = self.ticketing.get(existing_ticket.provider)?;
                     provider
                         .update_priority(TicketPriorityRequest {
                             ticket: existing_ticket.clone(),
@@ -237,7 +247,7 @@ impl IntakeService {
                     ticket_action = TicketAction::Escalated;
                 } else {
                     let comment = build_repeat_comment(occurred_at);
-                    let provider = self.providers.ticketing(existing_ticket.provider)?;
+                    let provider = self.ticketing.get(existing_ticket.provider)?;
                     provider
                         .add_comment(TicketCommentRequest {
                             ticket: existing_ticket.clone(),
@@ -251,7 +261,7 @@ impl IntakeService {
                 }
             } else {
                 let comment = build_repeat_comment(occurred_at);
-                let provider = self.providers.ticketing(existing_ticket.provider)?;
+                let provider = self.ticketing.get(existing_ticket.provider)?;
                 provider
                     .add_comment(TicketCommentRequest {
                         ticket: existing_ticket.clone(),
@@ -294,8 +304,8 @@ impl IntakeService {
     ) -> AppResult<Ticket> {
         let priority = TicketPriority::from_severity(level);
         let remote_ticket = self
-            .providers
-            .ticketing(account.ticket_provider)?
+            .ticketing
+            .get(account.ticket_provider)?
             .create_ticket(TicketCreateRequest {
                 bug: bug.clone(),
                 account: account.clone(),
@@ -347,8 +357,8 @@ impl IntakeService {
         }
 
         let message = build_notification_message(account, bug, occurred_at);
-        self.providers
-            .notifications(account.notification_provider)?
+        self.notifications
+            .get(account.notification_provider)?
             .send(NotificationRequest {
                 account: account.clone(),
                 bug: bug.clone(),
