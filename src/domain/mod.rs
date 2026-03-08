@@ -7,12 +7,15 @@ use uuid::Uuid;
 
 use crate::{AppError, AppResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Severity {
     Debug,
     Info,
     Warn,
+    #[default]
     Error,
     Fatal,
 }
@@ -30,12 +33,6 @@ impl Severity {
 
     pub fn should_notify(self, min: Self) -> bool {
         self.rank() >= min.rank()
-    }
-}
-
-impl Default for Severity {
-    fn default() -> Self {
-        Self::Error
     }
 }
 
