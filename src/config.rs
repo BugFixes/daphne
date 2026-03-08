@@ -7,6 +7,8 @@ pub struct Config {
     pub bind_address: String,
     pub database_url: String,
     pub feature_flags_provider: String,
+    pub policy_provider: String,
+    pub policy2_engine_url: String,
     pub flagsgg_project_id: Option<String>,
     pub flagsgg_agent_id: Option<String>,
     pub flagsgg_environment_id: Option<String>,
@@ -21,6 +23,10 @@ impl Config {
             .unwrap_or_else(|_| "sqlite://bugfixes.db".to_string());
         let feature_flags_provider =
             env::var("BUGFIXES_FEATURE_FLAGS_PROVIDER").unwrap_or_else(|_| "local".to_string());
+        let policy_provider =
+            env::var("BUGFIXES_POLICY_PROVIDER").unwrap_or_else(|_| "local".to_string());
+        let policy2_engine_url = env::var("BUGFIXES_POLICY2_ENGINE_URL")
+            .unwrap_or_else(|_| "https://api.policy2.net/run".to_string());
         let flagsgg_project_id = non_empty_env("BUGFIXES_FLAGSGG_PROJECT_ID");
         let flagsgg_agent_id = non_empty_env("BUGFIXES_FLAGSGG_AGENT_ID");
         let flagsgg_environment_id = non_empty_env("BUGFIXES_FLAGSGG_ENVIRONMENT_ID");
@@ -48,11 +54,23 @@ impl Config {
                 "BUGFIXES_FEATURE_FLAGS_PROVIDER must be one of: local, flagsgg".to_string(),
             ));
         }
+        if !matches!(policy_provider.as_str(), "local" | "policy2") {
+            return Err(AppError::Validation(
+                "BUGFIXES_POLICY_PROVIDER must be one of: local, policy2".to_string(),
+            ));
+        }
+        if policy2_engine_url.trim().is_empty() {
+            return Err(AppError::Validation(
+                "BUGFIXES_POLICY2_ENGINE_URL cannot be empty".to_string(),
+            ));
+        }
 
         Ok(Self {
             bind_address,
             database_url,
             feature_flags_provider,
+            policy_provider,
+            policy2_engine_url,
             flagsgg_project_id,
             flagsgg_agent_id,
             flagsgg_environment_id,

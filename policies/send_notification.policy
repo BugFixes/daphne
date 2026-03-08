@@ -1,0 +1,23 @@
+# bugfix.es notification policy
+
+A **notification** is sent
+  if the **notification** configuration chose a supported provider
+  and the **notification** configuration is enabled
+  and the **event** meets the account threshold
+  and the **ticket** has a notifiable action
+  and the **account** has a notification api key.
+
+The **notification** configuration chose a supported provider
+  if the __provider__ of the **notification** configuration matches regex "^(slack|teams|resend)$".
+
+The **notification** configuration is enabled
+  if the __enabled__ of the **notification** configuration is equal to true.
+
+The **event** meets the account threshold
+  if the __rank__ of the **event** is greater than or equal to the __notify_min_rank__ of the **account**.
+
+The **ticket** has a notifiable action
+  if the __action__ of the **ticket** matches regex "^(created|escalated)$".
+
+An **account** has a notification api key
+  if the __api_key__ of the **account** matches regex "^.+$".

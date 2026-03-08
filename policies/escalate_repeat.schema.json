@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bugfix.es Escalate Repeat Policy Input",
+  "type": "object",
+  "properties": {
+    "bug": {
+      "type": "object",
+      "properties": {
+        "has_ticket": {
+          "type": "boolean"
+        },
+        "recent_count": {
+          "type": "integer"
+        },
+        "rapid_occurrence_threshold": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "has_ticket",
+        "recent_count",
+        "rapid_occurrence_threshold"
+      ],
+      "additionalProperties": false
+    },
+    "ticket": {
+      "type": "object",
+      "properties": {
+        "current_priority_rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "next_priority_rank": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "current_priority_rank",
+        "next_priority_rank"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "bug",
+    "ticket"
+  ],
+  "additionalProperties": false
+}

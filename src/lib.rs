@@ -4,6 +4,7 @@ pub mod config;
 pub mod domain;
 pub mod feature_flags;
 pub mod notifications;
+pub mod policy;
 pub mod repository;
 pub mod service;
 pub mod ticketing;

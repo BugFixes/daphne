@@ -96,14 +96,19 @@ impl Repository {
             name: request.name,
             create_tickets: request.create_tickets,
             ticket_provider: request.ticket_provider,
+            ticketing_api_key: normalize_optional(request.ticketing_api_key),
             notification_provider: request.notification_provider,
+            notification_api_key: normalize_optional(request.notification_api_key),
+            ai_enabled: request.ai_enabled,
+            use_managed_ai: request.use_managed_ai,
+            ai_api_key: normalize_optional(request.ai_api_key),
             notify_min_level: request.notify_min_level,
             rapid_occurrence_window_minutes: request.rapid_occurrence_window_minutes,
             rapid_occurrence_threshold: request.rapid_occurrence_threshold,
         };
 
         let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO accounts (id, name, create_tickets, ticket_provider, notification_provider, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES (",
+            "INSERT INTO accounts (id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES (",
         );
         {
             let mut separated = query.separated(", ");
@@ -111,7 +116,12 @@ impl Repository {
             separated.push_bind(account.name.clone());
             separated.push_bind(account.create_tickets as i64);
             separated.push_bind(account.ticket_provider.to_string());
+            separated.push_bind(account.ticketing_api_key.clone());
             separated.push_bind(account.notification_provider.to_string());
+            separated.push_bind(account.notification_api_key.clone());
+            separated.push_bind(account.ai_enabled as i64);
+            separated.push_bind(account.use_managed_ai as i64);
+            separated.push_bind(account.ai_api_key.clone());
             separated.push_bind(account.notify_min_level.to_string());
             separated.push_bind(account.rapid_occurrence_window_minutes);
             separated.push_bind(account.rapid_occurrence_threshold);
@@ -153,7 +163,7 @@ impl Repository {
 
     pub async fn find_account(&self, account_id: Uuid) -> AppResult<Account> {
         let mut query = QueryBuilder::<Any>::new(
-            "SELECT id, name, create_tickets, ticket_provider, notification_provider, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = ",
+            "SELECT id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = ",
         );
         query.push_bind(account_id.to_string());
         let row = query
@@ -494,13 +504,24 @@ fn ensure_sqlite_database_exists(database_url: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_optional(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[derive(Debug, FromRow)]
 struct AccountRow {
     id: String,
     name: String,
     create_tickets: i64,
     ticket_provider: String,
+    ticketing_api_key: Option<String>,
     notification_provider: String,
+    notification_api_key: Option<String>,
+    ai_enabled: i64,
+    use_managed_ai: i64,
+    ai_api_key: Option<String>,
     notify_min_level: String,
     rapid_occurrence_window_minutes: i64,
     rapid_occurrence_threshold: i64,
@@ -515,7 +536,12 @@ impl TryFrom<AccountRow> for Account {
             name: row.name,
             create_tickets: row.create_tickets != 0,
             ticket_provider: TicketProvider::from_str(&row.ticket_provider)?,
+            ticketing_api_key: normalize_optional(row.ticketing_api_key),
             notification_provider: NotificationProvider::from_str(&row.notification_provider)?,
+            notification_api_key: normalize_optional(row.notification_api_key),
+            ai_enabled: row.ai_enabled != 0,
+            use_managed_ai: row.use_managed_ai != 0,
+            ai_api_key: normalize_optional(row.ai_api_key),
             notify_min_level: Severity::from_str(&row.notify_min_level)?,
             rapid_occurrence_window_minutes: row.rapid_occurrence_window_minutes,
             rapid_occurrence_threshold: row.rapid_occurrence_threshold,

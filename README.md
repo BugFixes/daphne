@@ -7,6 +7,8 @@
 - notify users only when the account severity threshold says it should
 - escalate or comment on the existing ticket when the bug repeats
 
+Ticketing, notification, and AI execution are policy-gated from raw account context. The service sends the chosen provider or advisor, whether that integration is enabled, and any configured credential to the policy engine, and the policy decides whether the action is allowed.
+
 This repository is a fresh implementation. The abandoned Go prototype in `../celeste` was used only as a reference for system boundaries.
 
 ## What exists now
@@ -53,6 +55,8 @@ Environment variables:
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
 - `BUGFIXES_DATABASE_URL` default: `sqlite://bugfixes.db`
 - `BUGFIXES_FEATURE_FLAGS_PROVIDER` default: `local`
+- `BUGFIXES_POLICY_PROVIDER` default: `local`
+- `BUGFIXES_POLICY2_ENGINE_URL` default: `https://api.policy2.net/run`
 - `BUGFIXES_DISABLED_FEATURES` optional comma-separated local disable list
 - `BUGFIXES_FLAGSGG_PROJECT_ID` optional when using `flagsgg`
 - `BUGFIXES_FLAGSGG_AGENT_ID` optional when using `flagsgg`
@@ -71,7 +75,11 @@ curl -X POST http://127.0.0.1:3000/v1/accounts \
     "name": "Acme",
     "create_tickets": true,
     "ticket_provider": "jira",
+    "ticketing_api_key": "jira_test_key",
     "notification_provider": "slack",
+    "notification_api_key": "slack_webhook_or_key",
+    "ai_enabled": true,
+    "use_managed_ai": true,
     "notify_min_level": "error",
     "rapid_occurrence_window_minutes": 30,
     "rapid_occurrence_threshold": 3
@@ -164,6 +172,25 @@ cargo run --features flagsgg
 ```
 
 and set the `BUGFIXES_FLAGSGG_*` environment variables.
+
+## Policies
+
+Business decisions can now run locally or through `policy2`.
+
+Current embedded policies live in [`policies/create_ticket.policy`](./policies/create_ticket.policy), [`policies/escalate_repeat.policy`](./policies/escalate_repeat.policy), [`policies/send_notification.policy`](./policies/send_notification.policy), and [`policies/use_ai.policy`](./policies/use_ai.policy).
+
+Matching JSON Schemas for those `decision` payloads live in [`policies/create_ticket.schema.json`](./policies/create_ticket.schema.json), [`policies/escalate_repeat.schema.json`](./policies/escalate_repeat.schema.json), [`policies/send_notification.schema.json`](./policies/send_notification.schema.json), and [`policies/use_ai.schema.json`](./policies/use_ai.schema.json).
+
+By default the service uses a local policy engine that preserves the current Rust behavior. To delegate those checks to `policy2`, set:
+
+```bash
+BUGFIXES_POLICY_PROVIDER=policy2
+BUGFIXES_POLICY2_ENGINE_URL=https://api.policy2.net/run
+```
+
+The `policy2` client sends the embedded rule text and the policy input payload to the engine. That payload includes stack facts, the chosen provider or advisor, the relevant enablement booleans, and the configured API key where that action requires one.
+
+When `BUGFIXES_POLICY_PROVIDER=policy2`, `policy2` is authoritative for the `true` or `false` decision. The Rust service only supplies facts and performs the operation if policy returns `true`. Use `BUGFIXES_POLICY_PROVIDER=local` only for local development or when you explicitly want the built-in Rust evaluator.
 
 ## Next steps
 

@@ -13,6 +13,14 @@ use crate::{
     },
     feature_flags::FeatureFlagsClient,
     notifications::{NotificationRegistry, NotificationRequest, build_notification_message},
+    policy::{
+        CreateTicketAccountPolicyInput, CreateTicketPolicyInput, CreateTicketProviderPolicyInput,
+        CreateTicketStackPolicyInput, EscalateRepeatBugPolicyInput, EscalateRepeatPolicyInput,
+        EscalateRepeatTicketPolicyInput, PolicyEngine, SendNotificationAccountPolicyInput,
+        SendNotificationEventPolicyInput, SendNotificationPolicyInput,
+        SendNotificationProviderPolicyInput, SendNotificationTicketPolicyInput,
+        UseAiAccountPolicyInput, UseAiAdvisorPolicyInput, UseAiPolicyInput,
+    },
     repository::{CreateBugRecord, CreateTicketRecord, Repository},
     ticketing::{
         TicketCommentRequest, TicketCreateRequest, TicketPriorityRequest, TicketingRegistry,
@@ -27,6 +35,7 @@ pub struct IntakeService {
     notifications: Arc<NotificationRegistry>,
     ai: Arc<AiRegistry>,
     feature_flags: Arc<dyn FeatureFlagsClient>,
+    policy_engine: Arc<dyn PolicyEngine>,
 }
 
 impl IntakeService {
@@ -36,6 +45,7 @@ impl IntakeService {
         notifications: Arc<NotificationRegistry>,
         ai: Arc<AiRegistry>,
         feature_flags: Arc<dyn FeatureFlagsClient>,
+        policy_engine: Arc<dyn PolicyEngine>,
     ) -> Self {
         Self {
             repository,
@@ -43,6 +53,7 @@ impl IntakeService {
             notifications,
             ai,
             feature_flags,
+            policy_engine,
         }
     }
 
@@ -122,27 +133,38 @@ impl IntakeService {
             .record_occurrence(bug.id, request.level, &request.stacktrace, occurred_at)
             .await?;
 
-        let (ticket_action, ticket, ai_recommendation) = if account.create_tickets {
-            if self
-                .feature_flags
-                .is_enabled(&account.ticket_provider.to_string())
-                .await?
-            {
-                let recommendation = self.recommendation_for(&bug, &request.stacktrace).await?;
-                let ticket = self
-                    .create_ticket(
-                        &account,
-                        &bug,
-                        request.level,
-                        &recommendation,
-                        &request.stacktrace,
-                        occurred_at,
-                    )
-                    .await?;
-                (TicketAction::Created, Some(ticket), Some(recommendation))
-            } else {
-                (TicketAction::Skipped, None, None)
-            }
+        let (ticket_action, ticket, ai_recommendation) = if self
+            .policy_engine
+            .should_create_ticket(&CreateTicketPolicyInput {
+                stack: CreateTicketStackPolicyInput { hash_exists: false },
+                account: CreateTicketAccountPolicyInput {
+                    ticketing_enabled: account.create_tickets,
+                    api_key: account.ticketing_api_key.clone(),
+                },
+                ticketing: CreateTicketProviderPolicyInput {
+                    provider: account.ticket_provider.to_string(),
+                    enabled: self
+                        .feature_flags
+                        .is_enabled(&account.ticket_provider.to_string())
+                        .await?,
+                },
+            })
+            .await?
+        {
+            let recommendation = self
+                .recommendation_for(&account, &bug, &request.stacktrace)
+                .await?;
+            let ticket = self
+                .create_ticket(
+                    &account,
+                    &bug,
+                    request.level,
+                    &recommendation,
+                    &request.stacktrace,
+                    occurred_at,
+                )
+                .await?;
+            (TicketAction::Created, Some(ticket), Some(recommendation))
         } else {
             (TicketAction::Skipped, None, None)
         };
@@ -202,73 +224,84 @@ impl IntakeService {
         let mut ticket = self.repository.find_ticket_for_bug(bug.id).await?;
         let mut ai_recommendation = ticket.as_ref().map(|record| record.recommendation.clone());
 
-        if ticket.is_none() && account.create_tickets {
+        if ticket.is_none()
+            && self
+                .policy_engine
+                .should_create_ticket(&CreateTicketPolicyInput {
+                    stack: CreateTicketStackPolicyInput { hash_exists: true },
+                    account: CreateTicketAccountPolicyInput {
+                        ticketing_enabled: account.create_tickets,
+                        api_key: account.ticketing_api_key.clone(),
+                    },
+                    ticketing: CreateTicketProviderPolicyInput {
+                        provider: account.ticket_provider.to_string(),
+                        enabled: self
+                            .feature_flags
+                            .is_enabled(&account.ticket_provider.to_string())
+                            .await?,
+                    },
+                })
+                .await?
+        {
+            let recommendation = self
+                .recommendation_for(&account, &bug, &request.stacktrace)
+                .await?;
+            let created_ticket = self
+                .create_ticket(
+                    &account,
+                    &bug,
+                    request.level,
+                    &recommendation,
+                    &request.stacktrace,
+                    occurred_at,
+                )
+                .await?;
+            ai_recommendation = Some(recommendation);
+            ticket_action = TicketAction::Created;
+            ticket = Some(created_ticket);
+        } else if let Some(existing_ticket) = ticket.clone() {
+            let next_priority = existing_ticket.priority.escalated();
             if self
-                .feature_flags
-                .is_enabled(&account.ticket_provider.to_string())
+                .policy_engine
+                .should_escalate_repeat(&EscalateRepeatPolicyInput {
+                    bug: EscalateRepeatBugPolicyInput {
+                        has_ticket: true,
+                        recent_count,
+                        rapid_occurrence_threshold: account.rapid_occurrence_threshold,
+                    },
+                    ticket: EscalateRepeatTicketPolicyInput {
+                        current_priority_rank: existing_ticket.priority.rank(),
+                        next_priority_rank: next_priority.rank(),
+                    },
+                })
                 .await?
             {
-                let recommendation = self.recommendation_for(&bug, &request.stacktrace).await?;
-                let created_ticket = self
-                    .create_ticket(
-                        &account,
-                        &bug,
-                        request.level,
-                        &recommendation,
-                        &request.stacktrace,
-                        occurred_at,
-                    )
+                let provider = self.ticketing.get(existing_ticket.provider)?;
+                provider
+                    .update_priority(TicketPriorityRequest {
+                        ticket: existing_ticket.clone(),
+                        priority: next_priority,
+                    })
                     .await?;
-                ai_recommendation = Some(recommendation);
-                ticket_action = TicketAction::Created;
-                ticket = Some(created_ticket);
-            }
-        } else if let Some(existing_ticket) = ticket.clone() {
-            if recent_count >= account.rapid_occurrence_threshold {
-                let next_priority = existing_ticket.priority.escalated();
-                if next_priority != existing_ticket.priority {
-                    let provider = self.ticketing.get(existing_ticket.provider)?;
-                    provider
-                        .update_priority(TicketPriorityRequest {
-                            ticket: existing_ticket.clone(),
+                self.repository
+                    .update_ticket_priority(existing_ticket.id, next_priority, occurred_at)
+                    .await?;
+                let comment =
+                    build_escalation_comment(recent_count, account.rapid_occurrence_window_minutes);
+                provider
+                    .add_comment(TicketCommentRequest {
+                        ticket: Ticket {
                             priority: next_priority,
-                        })
-                        .await?;
-                    self.repository
-                        .update_ticket_priority(existing_ticket.id, next_priority, occurred_at)
-                        .await?;
-                    let comment = build_escalation_comment(
-                        recent_count,
-                        account.rapid_occurrence_window_minutes,
-                    );
-                    provider
-                        .add_comment(TicketCommentRequest {
-                            ticket: Ticket {
-                                priority: next_priority,
-                                updated_at: occurred_at,
-                                ..existing_ticket.clone()
-                            },
-                            comment: comment.clone(),
-                        })
-                        .await?;
-                    self.repository
-                        .add_ticket_comment(existing_ticket.id, &comment, occurred_at)
-                        .await?;
-                    ticket_action = TicketAction::Escalated;
-                } else {
-                    let comment = build_repeat_comment(occurred_at);
-                    let provider = self.ticketing.get(existing_ticket.provider)?;
-                    provider
-                        .add_comment(TicketCommentRequest {
-                            ticket: existing_ticket.clone(),
-                            comment: comment.clone(),
-                        })
-                        .await?;
-                    self.repository
-                        .add_ticket_comment(existing_ticket.id, &comment, occurred_at)
-                        .await?;
-                    ticket_action = TicketAction::Commented;
-                }
+                            updated_at: occurred_at,
+                            ..existing_ticket.clone()
+                        },
+                        comment: comment.clone(),
+                    })
+                    .await?;
+                self.repository
+                    .add_ticket_comment(existing_ticket.id, &comment, occurred_at)
+                    .await?;
+                ticket_action = TicketAction::Escalated;
             } else {
                 let comment = build_repeat_comment(occurred_at);
                 let provider = self.ticketing.get(existing_ticket.provider)?;
@@ -339,14 +372,32 @@ impl IntakeService {
             .await
     }
 
-    async fn recommendation_for(&self, bug: &Bug, stacktrace: &str) -> AppResult<String> {
+    async fn recommendation_for(
+        &self,
+        account: &Account,
+        bug: &Bug,
+        stacktrace: &str,
+    ) -> AppResult<String> {
         let advisor_key = self.ai.default_advisor_key();
         if !self
-            .feature_flags
-            .is_enabled(&format!("ai/{advisor_key}"))
+            .policy_engine
+            .should_use_ai(&UseAiPolicyInput {
+                account: UseAiAccountPolicyInput {
+                    enabled: account.ai_enabled,
+                    use_managed: account.use_managed_ai,
+                    api_key: account.ai_api_key.clone(),
+                },
+                ai: UseAiAdvisorPolicyInput {
+                    advisor: advisor_key.to_string(),
+                    enabled: self
+                        .feature_flags
+                        .is_enabled(&format!("ai/{advisor_key}"))
+                        .await?,
+                },
+            })
             .await?
         {
-            return Ok("AI recommendation disabled by feature flag.".to_string());
+            return Ok("AI recommendation skipped by policy.".to_string());
         }
 
         self.ai
@@ -363,29 +414,26 @@ impl IntakeService {
         ticket_action: TicketAction,
         occurred_at: DateTime<Utc>,
     ) -> AppResult<crate::domain::NotificationOutcome> {
-        if !level.should_notify(account.notify_min_level) {
-            return Ok(NotificationOutcome {
-                sent: false,
-                provider: None,
-                message: None,
-            });
-        }
-
-        if !matches!(
-            ticket_action,
-            TicketAction::Created | TicketAction::Escalated
-        ) {
-            return Ok(NotificationOutcome {
-                sent: false,
-                provider: None,
-                message: None,
-            });
-        }
-
         let message = build_notification_message(account, bug, occurred_at);
         if !self
-            .feature_flags
-            .is_enabled(&account.notification_provider.to_string())
+            .policy_engine
+            .should_send_notification(&SendNotificationPolicyInput {
+                event: SendNotificationEventPolicyInput { rank: level.rank() },
+                account: SendNotificationAccountPolicyInput {
+                    notify_min_rank: account.notify_min_level.rank(),
+                    api_key: account.notification_api_key.clone(),
+                },
+                notification: SendNotificationProviderPolicyInput {
+                    provider: account.notification_provider.to_string(),
+                    enabled: self
+                        .feature_flags
+                        .is_enabled(&account.notification_provider.to_string())
+                        .await?,
+                },
+                ticket: SendNotificationTicketPolicyInput {
+                    action: ticket_action.to_string(),
+                },
+            })
             .await?
         {
             return Ok(NotificationOutcome {

@@ -11,6 +11,7 @@ use crate::{
     },
     feature_flags::build_feature_flags,
     notifications::NotificationRegistry,
+    policy::build_policy_engine,
     repository::Repository,
     ticketing::TicketingRegistry,
 };
@@ -26,6 +27,8 @@ async fn test_service_with_disabled_features(disabled_features: HashSet<String>)
         bind_address: "127.0.0.1:0".to_string(),
         database_url: "sqlite::memory:".to_string(),
         feature_flags_provider: "local".to_string(),
+        policy_provider: "local".to_string(),
+        policy2_engine_url: "https://api.policy2.net/run".to_string(),
         flagsgg_project_id: None,
         flagsgg_agent_id: None,
         flagsgg_environment_id: None,
@@ -36,7 +39,15 @@ async fn test_service_with_disabled_features(disabled_features: HashSet<String>)
     let notifications = Arc::new(NotificationRegistry::default());
     let ai = Arc::new(AiRegistry::default());
     let feature_flags = build_feature_flags(&config).expect("feature flags");
-    IntakeService::new(repository, ticketing, notifications, ai, feature_flags)
+    let policy_engine = build_policy_engine(&config).expect("policy engine");
+    IntakeService::new(
+        repository,
+        ticketing,
+        notifications,
+        ai,
+        feature_flags,
+        policy_engine,
+    )
 }
 
 #[tokio::test]
@@ -48,7 +59,12 @@ async fn creates_ticket_and_notification_for_new_bug() {
             name: "Acme".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Linear,
+            ticketing_api_key: Some("linear_test_key".to_string()),
             notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
             notify_min_level: Severity::Error,
             rapid_occurrence_window_minutes: 30,
             rapid_occurrence_threshold: 2,
@@ -103,7 +119,12 @@ async fn escalates_existing_bug_when_it_repeats_rapidly() {
             name: "Beta".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
+            ticketing_api_key: Some("jira_test_key".to_string()),
             notification_provider: NotificationProvider::Teams,
+            notification_api_key: Some("teams_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
             notify_min_level: Severity::Warn,
             rapid_occurrence_window_minutes: 60,
             rapid_occurrence_threshold: 2,
@@ -167,7 +188,12 @@ async fn suppresses_debug_notification() {
             name: "Gamma".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Tracklines,
+            ticketing_api_key: Some("tracklines_test_key".to_string()),
             notification_provider: NotificationProvider::Resend,
+            notification_api_key: Some("resend_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
             notify_min_level: Severity::Error,
             rapid_occurrence_window_minutes: 15,
             rapid_occurrence_threshold: 2,
@@ -211,7 +237,12 @@ async fn skips_ticket_creation_when_ticket_provider_flag_is_disabled() {
             name: "Delta".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
+            ticketing_api_key: Some("jira_test_key".to_string()),
             notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
             notify_min_level: Severity::Error,
             rapid_occurrence_window_minutes: 30,
             rapid_occurrence_threshold: 2,
@@ -257,7 +288,12 @@ async fn skips_notification_when_notification_provider_flag_is_disabled() {
             name: "Epsilon".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Github,
+            ticketing_api_key: Some("github_test_key".to_string()),
             notification_provider: NotificationProvider::Slack,
+            notification_api_key: None,
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
             notify_min_level: Severity::Error,
             rapid_occurrence_window_minutes: 30,
             rapid_occurrence_threshold: 2,
@@ -292,4 +328,56 @@ async fn skips_notification_when_notification_provider_flag_is_disabled() {
     assert!(response.ticket.is_some());
     assert!(!response.notification.sent);
     assert!(response.notification.provider.is_none());
+}
+
+#[tokio::test]
+async fn skips_ai_when_account_uses_customer_managed_ai_without_api_key() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Zeta".to_string(),
+            create_tickets: true,
+            ticket_provider: TicketProvider::Linear,
+            ticketing_api_key: Some("linear_test_key".to_string()),
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: false,
+            ai_api_key: None,
+            notify_min_level: Severity::Error,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "api".to_string(),
+        })
+        .await
+        .expect("agent");
+
+    let response = service
+        .ingest(StacktraceEventRequest {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            stacktrace: "panic: nil pointer dereference".to_string(),
+            level: Severity::Error,
+            occurred_at: Some(Utc::now()),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("ingest");
+
+    assert_eq!(response.ticket_action, TicketAction::Created);
+    assert_eq!(
+        response.ai_recommendation.as_deref(),
+        Some("AI recommendation skipped by policy.")
+    );
 }

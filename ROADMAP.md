@@ -30,6 +30,7 @@ Status as of `2026-03-08`:
 - Go agent contract is supported on `/v1/log` and `/v1/bug`.
 - Rust agent contract is compatible with the same endpoints.
 - Feature-flag wiring exists with local flags and optional `flags.gg` support.
+- Policy wiring exists with embedded rule files, a local evaluator, and optional `policy2` engine delegation.
 - Provider rollout flags are aligned to the active `flags.gg` keys: `jira`, `github`, `linear`, `tracklines`, `slack`, `teams`, `resend`.
 - Provider implementations are still stubs.
 - Provider code is grouped into `ticketing/*`, `notifications/*`, and `ai/*`.
@@ -78,6 +79,7 @@ Scope:
 - add better error handling around external provider failures
 - add end-to-end integration tests
 - add Postgres validation coverage
+- move more hard-coded workflow decisions behind `policy2` where boolean policies are sufficient
 - decide when SQLite and Postgres diverge operationally
 
 Target window:
@@ -92,6 +94,7 @@ Exit criteria:
 - schemas are versioned
 - intake behavior is deterministic and test-covered
 - database changes are migration-driven
+- policy-backed decisions are in place for ticket creation, notification gating, and repeat escalation
 
 Status:
 - `planned`

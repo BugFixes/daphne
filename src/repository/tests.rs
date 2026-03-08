@@ -14,6 +14,8 @@ async fn enables_foreign_keys_for_every_sqlite_pool_connection() {
         bind_address: "127.0.0.1:0".to_string(),
         database_url,
         feature_flags_provider: "local".to_string(),
+        policy_provider: "local".to_string(),
+        policy2_engine_url: "https://api.policy2.net/run".to_string(),
         flagsgg_project_id: None,
         flagsgg_agent_id: None,
         flagsgg_environment_id: None,
