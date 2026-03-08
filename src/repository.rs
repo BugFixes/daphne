@@ -71,6 +71,7 @@ impl Repository {
                 account_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 api_key TEXT NOT NULL UNIQUE,
+                api_secret TEXT NOT NULL,
                 FOREIGN KEY(account_id) REFERENCES accounts(id) ON DELETE CASCADE
             )
             "#,
@@ -212,13 +213,17 @@ impl Repository {
             account_id: request.account_id,
             name: request.name,
             api_key: Uuid::new_v4().simple().to_string(),
+            api_secret: Uuid::new_v4().simple().to_string(),
         };
 
-        sqlx::query("INSERT INTO agents (id, account_id, name, api_key) VALUES (?1, ?2, ?3, ?4)")
+        sqlx::query(
+            "INSERT INTO agents (id, account_id, name, api_key, api_secret) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
             .bind(agent.id.to_string())
             .bind(agent.account_id.to_string())
             .bind(&agent.name)
             .bind(&agent.api_key)
+            .bind(&agent.api_secret)
             .execute(&self.pool)
             .await?;
 
@@ -241,6 +246,23 @@ impl Repository {
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(|| AppError::NotFound("agent for provided key".to_string()))?;
+
+        row.try_into()
+    }
+
+    pub async fn find_agent_by_credentials(
+        &self,
+        api_key: &str,
+        api_secret: &str,
+    ) -> AppResult<Agent> {
+        let row = sqlx::query_as::<_, AgentRow>(
+            "SELECT * FROM agents WHERE api_key = ?1 AND api_secret = ?2",
+        )
+        .bind(api_key)
+        .bind(api_secret)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("agent for provided credentials".to_string()))?;
 
         row.try_into()
     }
@@ -535,6 +557,7 @@ struct AgentRow {
     account_id: String,
     name: String,
     api_key: String,
+    api_secret: String,
 }
 
 impl TryFrom<AgentRow> for Agent {
@@ -546,6 +569,7 @@ impl TryFrom<AgentRow> for Agent {
             account_id: Uuid::parse_str(&row.account_id)?,
             name: row.name,
             api_key: row.api_key,
+            api_secret: row.api_secret,
         })
     }
 }

@@ -12,8 +12,10 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 ## What exists now
 
 - `POST /v1/accounts` creates an account with ticketing and notification policy.
-- `POST /v1/agents` creates an agent and returns its `api_key`.
-- `POST /v1/events/stacktraces` ingests a stacktrace event, hashes it, stores occurrences, creates or updates a ticket, and records notifications.
+- `POST /v1/agents` creates an agent and returns its `api_key` and `api_secret`.
+- `POST /v1/log` accepts the native `go-bugfixes/logs` payload shape.
+- `POST /v1/bug` accepts the native `go-bugfixes/middleware` payload shape.
+- `POST /v1/events/stacktraces` remains available as a generic non-Go intake path.
 - `GET /healthz` returns a basic health response.
 
 The current providers are local stubs for:
@@ -64,23 +66,47 @@ curl -X POST http://127.0.0.1:3000/v1/agents \
   }'
 ```
 
-Send a stacktrace:
+The agent response includes both `api_key` and `api_secret`.
+
+Send a `go-bugfixes/logs` payload:
 
 ```bash
-curl -X POST http://127.0.0.1:3000/v1/events/stacktraces \
+curl -X POST http://127.0.0.1:3000/v1/log \
   -H 'content-type: application/json' \
+  -H 'X-API-KEY: REPLACE_WITH_AGENT_KEY' \
+  -H 'X-API-SECRET: REPLACE_WITH_AGENT_SECRET' \
   -d '{
-    "agent_key": "REPLACE_WITH_AGENT_KEY",
-    "language": "rust",
+    "log": "database timeout",
     "level": "error",
-    "stacktrace": "thread '\''main'\'' panicked at '\''index out of bounds'\''"
+    "file": "/srv/app/main.go",
+    "line": "42",
+    "line_number": 42,
+    "stack": "Z29yb3V0aW5lIDEgW3J1bm5pbmdd"
+  }'
+```
+
+Send a `go-bugfixes/middleware` panic payload:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/bug \
+  -H 'content-type: application/json' \
+  -H 'X-API-KEY: REPLACE_WITH_AGENT_KEY' \
+  -H 'X-API-SECRET: REPLACE_WITH_AGENT_SECRET' \
+  -d '{
+    "bug": "panic: index out of bounds",
+    "raw": "main.go:42\npanic: index out of bounds",
+    "bug_line": "main.go:42",
+    "file": "main.go",
+    "line": "42",
+    "line_number": 42,
+    "level": "panic"
   }'
 ```
 
 ## Data model
 
 - `accounts` own the policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
-- `agents` authenticate intake requests.
+- `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`.
 - `bugs` are deduplicated by `account_id + stacktrace_hash`.
 - `occurrences` store each event so rapid-repeat detection can be based on time windows.
 - `tickets` store the external issue reference plus AI recommendation and current priority.
@@ -92,3 +118,4 @@ curl -X POST http://127.0.0.1:3000/v1/events/stacktraces \
 - replace the heuristic AI advisor with a real model-backed implementation
 - add account-specific provider credentials and webhook targets
 - add richer normalization per language runtime so equivalent traces hash together more reliably
+- add request fixtures derived from `../go-bugfixes` so the agent and service contract stays locked together

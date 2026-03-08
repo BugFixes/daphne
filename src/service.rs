@@ -38,10 +38,18 @@ impl IntakeService {
     ) -> AppResult<crate::domain::IntakeOutcome> {
         request.validate()?;
 
-        let agent = self
-            .repository
-            .find_agent_by_key(&request.agent_key)
-            .await?;
+        let agent = match request.agent_secret.as_deref() {
+            Some(agent_secret) => {
+                self.repository
+                    .find_agent_by_credentials(&request.agent_key, agent_secret)
+                    .await?
+            }
+            None => {
+                self.repository
+                    .find_agent_by_key(&request.agent_key)
+                    .await?
+            }
+        };
         let account = self.repository.find_account(agent.account_id).await?;
         let occurred_at = request.occurred_at.unwrap_or_else(Utc::now);
         let normalized_stacktrace = normalize_stacktrace(&request.stacktrace);
@@ -436,6 +444,7 @@ mod tests {
         let response = service
             .ingest(StacktraceEventRequest {
                 agent_key: agent.api_key,
+                agent_secret: Some(agent.api_secret),
                 language: "rust".to_string(),
                 stacktrace: "panic: nil pointer dereference".to_string(),
                 level: Severity::Error,
@@ -491,6 +500,7 @@ mod tests {
         service
             .ingest(StacktraceEventRequest {
                 agent_key: agent.api_key.clone(),
+                agent_secret: Some(agent.api_secret.clone()),
                 language: "go".to_string(),
                 stacktrace: "panic: index out of bounds".to_string(),
                 level: Severity::Warn,
@@ -504,6 +514,7 @@ mod tests {
         let second = service
             .ingest(StacktraceEventRequest {
                 agent_key: agent.api_key,
+                agent_secret: Some(agent.api_secret),
                 language: "go".to_string(),
                 stacktrace: "panic: index out of bounds".to_string(),
                 level: Severity::Warn,
@@ -552,6 +563,7 @@ mod tests {
         let response = service
             .ingest(StacktraceEventRequest {
                 agent_key: agent.api_key,
+                agent_secret: Some(agent.api_secret),
                 language: "javascript".to_string(),
                 stacktrace: "TypeError: Cannot read properties of undefined".to_string(),
                 level: Severity::Debug,

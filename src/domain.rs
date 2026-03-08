@@ -2,6 +2,7 @@ use std::{collections::HashMap, fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{AppError, AppResult};
@@ -210,6 +211,7 @@ pub struct Agent {
     pub account_id: Uuid,
     pub name: String,
     pub api_key: String,
+    pub api_secret: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -302,6 +304,7 @@ impl CreateAgentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StacktraceEventRequest {
     pub agent_key: String,
+    pub agent_secret: Option<String>,
     pub language: String,
     pub stacktrace: String,
     #[serde(default)]
@@ -330,6 +333,28 @@ impl StacktraceEventRequest {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoLogPayload {
+    pub log: String,
+    pub level: String,
+    pub file: Option<String>,
+    pub line: Option<String>,
+    pub line_number: Option<i64>,
+    pub log_fmt: Option<String>,
+    pub stack: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GoBugPayload {
+    pub bug: Value,
+    pub raw: Value,
+    pub bug_line: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<String>,
+    pub line_number: Option<i64>,
+    pub level: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
