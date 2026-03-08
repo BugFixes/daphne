@@ -13,6 +13,9 @@ use crate::{
     },
 };
 
+#[cfg(test)]
+mod tests;
+
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
 
 #[derive(Clone)]
@@ -53,15 +56,24 @@ impl Repository {
             5
         };
 
+        let sqlite = is_sqlite_url(&config.database_url);
         let pool = AnyPoolOptions::new()
             .max_connections(max_connections)
+            .after_connect(move |conn, _meta| {
+                Box::pin(async move {
+                    if sqlite {
+                        sqlx::query("PRAGMA foreign_keys = ON")
+                            .execute(&mut *conn)
+                            .await?;
+                    }
+
+                    Ok(())
+                })
+            })
             .connect(&config.database_url)
             .await?;
 
-        if is_sqlite_url(&config.database_url) {
-            sqlx::query("PRAGMA foreign_keys = ON")
-                .execute(&pool)
-                .await?;
+        if sqlite {
             sqlx::query("PRAGMA journal_mode = WAL")
                 .execute(&pool)
                 .await?;
