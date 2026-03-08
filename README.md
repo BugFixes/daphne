@@ -13,8 +13,8 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 
 - `POST /v1/accounts` creates an account with ticketing and notification policy.
 - `POST /v1/agents` creates an agent and returns its `api_key` and `api_secret`.
-- `POST /v1/log` accepts the native `go-bugfixes/logs` payload shape.
-- `POST /v1/bug` accepts the native `go-bugfixes/middleware` payload shape.
+- `POST /v1/log` accepts the native `go-bugfixes/logs` and `bugfixes-rs` log payload shape.
+- `POST /v1/bug` accepts the native `go-bugfixes/middleware` and `bugfixes-rs` panic payload shape.
 - `POST /v1/events/stacktraces` remains available as a generic non-Go intake path.
 - `GET /healthz` returns a basic health response.
 
@@ -103,6 +103,8 @@ curl -X POST http://127.0.0.1:3000/v1/bug \
   }'
 ```
 
+`../bugfixes-rs` currently targets the same `POST /log` and `POST /bug` contract with the same `X-API-KEY` and `X-API-SECRET` headers, so the Rust agent can use this service without a separate intake path.
+
 ## Data model
 
 - `accounts` own the policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
@@ -119,3 +121,4 @@ curl -X POST http://127.0.0.1:3000/v1/bug \
 - add account-specific provider credentials and webhook targets
 - add richer normalization per language runtime so equivalent traces hash together more reliably
 - add request fixtures derived from `../go-bugfixes` so the agent and service contract stays locked together
+- add request fixtures derived from both `../go-bugfixes` and `../bugfixes-rs` so agent compatibility is tested, not assumed

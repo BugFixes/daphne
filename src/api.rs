@@ -288,4 +288,60 @@ mod tests {
             Some("main.go:99".to_string())
         );
     }
+
+    #[test]
+    fn accepts_rust_log_payload_shape() {
+        let payload = GoLogPayload {
+            log: "db timeout".to_string(),
+            level: "error".to_string(),
+            file: Some("src/main.rs".to_string()),
+            line: Some("27".to_string()),
+            line_number: Some(27),
+            log_fmt: Some("path=src/main.rs level=error msg=\"db timeout\" line=27".to_string()),
+            stack: Some(
+                "0: app::worker::run\nat /workspace/src/worker.rs:42:7\n1: std::rt::lang_start"
+                    .to_string(),
+            ),
+        };
+
+        let event = map_go_log_payload(
+            AgentAuth {
+                key: "key".to_string(),
+                secret: "secret".to_string(),
+            },
+            payload,
+        )
+        .expect("event");
+
+        assert_eq!(event.level, Severity::Error);
+        assert!(event.stacktrace.contains("src/main.rs:27"));
+        assert!(event.stacktrace.contains("app::worker::run"));
+        assert!(event.stacktrace.contains("/workspace/src/worker.rs:42:7"));
+    }
+
+    #[test]
+    fn accepts_rust_bug_payload_shape() {
+        let payload = GoBugPayload {
+            bug: json!("panic: worker crashed\n\n -> app::worker::run"),
+            raw: json!("0: app::worker::run\nat /workspace/src/worker.rs:42:7"),
+            bug_line: Some("/workspace/src/worker.rs:42:7".to_string()),
+            file: Some("/workspace/src/worker.rs".to_string()),
+            line: Some("42".to_string()),
+            line_number: Some(42),
+            level: "crash".to_string(),
+        };
+
+        let event = map_go_bug_payload(
+            AgentAuth {
+                key: "key".to_string(),
+                secret: "secret".to_string(),
+            },
+            payload,
+        )
+        .expect("event");
+
+        assert_eq!(event.level, Severity::Fatal);
+        assert!(event.stacktrace.contains("worker crashed"));
+        assert!(event.stacktrace.contains("/workspace/src/worker.rs:42:7"));
+    }
 }
