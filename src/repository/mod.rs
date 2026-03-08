@@ -21,6 +21,28 @@ pub struct Repository {
     pool: SqlitePool,
 }
 
+pub struct CreateBugRecord<'a> {
+    pub account_id: Uuid,
+    pub agent_id: Uuid,
+    pub language: &'a str,
+    pub severity: Severity,
+    pub stacktrace_hash: &'a str,
+    pub normalized_stacktrace: &'a str,
+    pub latest_stacktrace: &'a str,
+    pub occurred_at: DateTime<Utc>,
+}
+
+pub struct CreateTicketRecord<'a> {
+    pub bug_id: Uuid,
+    pub provider: TicketProvider,
+    pub remote_id: &'a str,
+    pub remote_url: &'a str,
+    pub priority: TicketPriority,
+    pub recommendation: &'a str,
+    pub status: &'a str,
+    pub now: DateTime<Utc>,
+}
+
 impl Repository {
     pub async fn connect(config: &Config) -> AppResult<Self> {
         let mut options = SqliteConnectOptions::from_str(&config.database_url)
@@ -283,28 +305,18 @@ impl Repository {
         row.map(TryInto::try_into).transpose()
     }
 
-    pub async fn create_bug(
-        &self,
-        account_id: Uuid,
-        agent_id: Uuid,
-        language: &str,
-        severity: Severity,
-        stacktrace_hash: &str,
-        normalized_stacktrace: &str,
-        latest_stacktrace: &str,
-        occurred_at: DateTime<Utc>,
-    ) -> AppResult<Bug> {
+    pub async fn create_bug(&self, record: CreateBugRecord<'_>) -> AppResult<Bug> {
         let bug = Bug {
             id: Uuid::new_v4(),
-            account_id,
-            agent_id,
-            language: language.to_string(),
-            severity,
-            stacktrace_hash: stacktrace_hash.to_string(),
-            normalized_stacktrace: normalized_stacktrace.to_string(),
-            latest_stacktrace: latest_stacktrace.to_string(),
-            first_seen_at: occurred_at,
-            last_seen_at: occurred_at,
+            account_id: record.account_id,
+            agent_id: record.agent_id,
+            language: record.language.to_string(),
+            severity: record.severity,
+            stacktrace_hash: record.stacktrace_hash.to_string(),
+            normalized_stacktrace: record.normalized_stacktrace.to_string(),
+            latest_stacktrace: record.latest_stacktrace.to_string(),
+            first_seen_at: record.occurred_at,
+            last_seen_at: record.occurred_at,
             occurrence_count: 1,
         };
 
@@ -408,28 +420,18 @@ impl Repository {
         Ok(count)
     }
 
-    pub async fn create_ticket(
-        &self,
-        bug_id: Uuid,
-        provider: TicketProvider,
-        remote_id: &str,
-        remote_url: &str,
-        priority: TicketPriority,
-        recommendation: &str,
-        status: &str,
-        now: DateTime<Utc>,
-    ) -> AppResult<Ticket> {
+    pub async fn create_ticket(&self, record: CreateTicketRecord<'_>) -> AppResult<Ticket> {
         let ticket = Ticket {
             id: Uuid::new_v4(),
-            bug_id,
-            provider,
-            remote_id: remote_id.to_string(),
-            remote_url: remote_url.to_string(),
-            priority,
-            recommendation: recommendation.to_string(),
-            status: status.to_string(),
-            created_at: now,
-            updated_at: now,
+            bug_id: record.bug_id,
+            provider: record.provider,
+            remote_id: record.remote_id.to_string(),
+            remote_url: record.remote_url.to_string(),
+            priority: record.priority,
+            recommendation: record.recommendation.to_string(),
+            status: record.status.to_string(),
+            created_at: record.now,
+            updated_at: record.now,
         };
 
         sqlx::query(
