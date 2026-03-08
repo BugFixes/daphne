@@ -2,6 +2,7 @@ pub mod ai;
 pub mod api;
 pub mod config;
 pub mod domain;
+pub mod feature_flags;
 pub mod notifications;
 pub mod repository;
 pub mod service;
@@ -25,6 +26,8 @@ pub enum AppError {
     Validation(String),
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+    #[error(transparent)]
+    Migrate(#[from] sqlx::migrate::MigrateError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -50,6 +53,7 @@ impl IntoResponse for AppError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
             Self::Sqlx(_)
+            | Self::Migrate(_)
             | Self::Io(_)
             | Self::AddrParse(_)
             | Self::Uuid(_)

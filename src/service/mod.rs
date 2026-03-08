@@ -11,6 +11,7 @@ use crate::{
         Account, Bug, NotificationOutcome, Severity, StacktraceEventRequest, Ticket, TicketAction,
         TicketPriority,
     },
+    feature_flags::FeatureFlagsClient,
     notifications::{NotificationRegistry, NotificationRequest, build_notification_message},
     repository::{CreateBugRecord, CreateTicketRecord, Repository},
     ticketing::{
@@ -25,6 +26,7 @@ pub struct IntakeService {
     ticketing: Arc<TicketingRegistry>,
     notifications: Arc<NotificationRegistry>,
     ai: Arc<AiRegistry>,
+    feature_flags: Arc<dyn FeatureFlagsClient>,
 }
 
 impl IntakeService {
@@ -33,12 +35,14 @@ impl IntakeService {
         ticketing: Arc<TicketingRegistry>,
         notifications: Arc<NotificationRegistry>,
         ai: Arc<AiRegistry>,
+        feature_flags: Arc<dyn FeatureFlagsClient>,
     ) -> Self {
         Self {
             repository,
             ticketing,
             notifications,
             ai,
+            feature_flags,
         }
     }
 
@@ -119,22 +123,26 @@ impl IntakeService {
             .await?;
 
         let (ticket_action, ticket, ai_recommendation) = if account.create_tickets {
-            let recommendation = self
-                .ai
-                .default_advisor()?
-                .recommend_fix(&bug, &request.stacktrace)
-                .await?;
-            let ticket = self
-                .create_ticket(
-                    &account,
-                    &bug,
-                    request.level,
-                    &recommendation,
-                    &request.stacktrace,
-                    occurred_at,
-                )
-                .await?;
-            (TicketAction::Created, Some(ticket), Some(recommendation))
+            if self
+                .feature_flags
+                .is_enabled(&account.ticket_provider.to_string())
+                .await?
+            {
+                let recommendation = self.recommendation_for(&bug, &request.stacktrace).await?;
+                let ticket = self
+                    .create_ticket(
+                        &account,
+                        &bug,
+                        request.level,
+                        &recommendation,
+                        &request.stacktrace,
+                        occurred_at,
+                    )
+                    .await?;
+                (TicketAction::Created, Some(ticket), Some(recommendation))
+            } else {
+                (TicketAction::Skipped, None, None)
+            }
         } else {
             (TicketAction::Skipped, None, None)
         };
@@ -195,24 +203,26 @@ impl IntakeService {
         let mut ai_recommendation = ticket.as_ref().map(|record| record.recommendation.clone());
 
         if ticket.is_none() && account.create_tickets {
-            let recommendation = self
-                .ai
-                .default_advisor()?
-                .recommend_fix(&bug, &request.stacktrace)
-                .await?;
-            let created_ticket = self
-                .create_ticket(
-                    &account,
-                    &bug,
-                    request.level,
-                    &recommendation,
-                    &request.stacktrace,
-                    occurred_at,
-                )
-                .await?;
-            ai_recommendation = Some(recommendation);
-            ticket_action = TicketAction::Created;
-            ticket = Some(created_ticket);
+            if self
+                .feature_flags
+                .is_enabled(&account.ticket_provider.to_string())
+                .await?
+            {
+                let recommendation = self.recommendation_for(&bug, &request.stacktrace).await?;
+                let created_ticket = self
+                    .create_ticket(
+                        &account,
+                        &bug,
+                        request.level,
+                        &recommendation,
+                        &request.stacktrace,
+                        occurred_at,
+                    )
+                    .await?;
+                ai_recommendation = Some(recommendation);
+                ticket_action = TicketAction::Created;
+                ticket = Some(created_ticket);
+            }
         } else if let Some(existing_ticket) = ticket.clone() {
             if recent_count >= account.rapid_occurrence_threshold {
                 let next_priority = existing_ticket.priority.escalated();
@@ -329,6 +339,22 @@ impl IntakeService {
             .await
     }
 
+    async fn recommendation_for(&self, bug: &Bug, stacktrace: &str) -> AppResult<String> {
+        let advisor_key = self.ai.default_advisor_key();
+        if !self
+            .feature_flags
+            .is_enabled(&format!("ai/{advisor_key}"))
+            .await?
+        {
+            return Ok("AI recommendation disabled by feature flag.".to_string());
+        }
+
+        self.ai
+            .default_advisor()?
+            .recommend_fix(bug, stacktrace)
+            .await
+    }
+
     async fn maybe_notify(
         &self,
         account: &Account,
@@ -357,6 +383,17 @@ impl IntakeService {
         }
 
         let message = build_notification_message(account, bug, occurred_at);
+        if !self
+            .feature_flags
+            .is_enabled(&account.notification_provider.to_string())
+            .await?
+        {
+            return Ok(NotificationOutcome {
+                sent: false,
+                provider: None,
+                message: None,
+            });
+        }
         self.notifications
             .get(account.notification_provider)?
             .send(NotificationRequest {

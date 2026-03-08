@@ -20,11 +20,18 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 
 The current providers are local stubs for:
 
-- ticketing: `jira`, `linear`, `tracklines`
+- ticketing: `jira`, `github`, `linear`, `tracklines`
 - notifications: `slack`, `teams`, `resend`
-- AI: heuristic recommendation generator
+- AI: `codex`, `claude`, `kimi`
 
 Those stubs let the full workflow run end-to-end before wiring real external APIs.
+
+The service now supports both:
+
+- SQLite for local development and tests
+- Postgres for non-local environments
+
+Schema setup is handled through SQL migrations in [`migrations/`](./migrations).
 
 ## Run
 
@@ -32,10 +39,26 @@ Those stubs let the full workflow run end-to-end before wiring real external API
 cargo run
 ```
 
+Common repo tasks:
+
+```bash
+just fmt
+just clippy
+just test
+just check
+```
+
 Environment variables:
 
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
 - `BUGFIXES_DATABASE_URL` default: `sqlite://bugfixes.db`
+- `BUGFIXES_FEATURE_FLAGS_PROVIDER` default: `local`
+- `BUGFIXES_DISABLED_FEATURES` optional comma-separated local disable list
+- `BUGFIXES_FLAGSGG_PROJECT_ID` optional when using `flagsgg`
+- `BUGFIXES_FLAGSGG_AGENT_ID` optional when using `flagsgg`
+- `BUGFIXES_FLAGSGG_ENVIRONMENT_ID` optional when using `flagsgg`
+
+Use `.env.example` as the configuration reference.
 
 ## Example flow
 
@@ -114,10 +137,38 @@ curl -X POST http://127.0.0.1:3000/v1/bug \
 - `tickets` store the external issue reference plus AI recommendation and current priority.
 - `notifications` and `ticket_comments` keep a local audit trail.
 
+## Feature Flags
+
+Feature flags can be used to dark-launch integrations and AI providers.
+
+Current provider flag keys:
+
+- `jira`
+- `github`
+- `linear`
+- `tracklines`
+- `slack`
+- `teams`
+- `resend`
+
+Current AI flag key:
+
+- `ai/codex`
+
+By default the service uses local always-on flags with optional disables via `BUGFIXES_DISABLED_FEATURES`. Local disables accept the bare provider names above and still accept the older namespaced values for compatibility.
+
+If you want runtime flags from `flags.gg`, build with:
+
+```bash
+cargo run --features flagsgg
+```
+
+and set the `BUGFIXES_FLAGSGG_*` environment variables.
+
 ## Next steps
 
-- replace stub ticketing providers with Jira, Linear, and Tracklines clients
-- replace the heuristic AI advisor with a real model-backed implementation
+- replace stub ticketing providers with Jira, GitHub Issues, Linear, and Tracklines clients
+- replace stub AI advisors with real model-backed Codex, Claude, and Kimi integrations
 - add account-specific provider credentials and webhook targets
 - add richer normalization per language runtime so equivalent traces hash together more reliably
 - add request fixtures derived from `../go-bugfixes` so the agent and service contract stays locked together
