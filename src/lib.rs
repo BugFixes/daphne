@@ -2,6 +2,7 @@ pub mod ai;
 pub mod api;
 pub mod config;
 pub mod domain;
+pub mod migrations;
 pub mod notifications;
 pub mod repository;
 pub mod service;

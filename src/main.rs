@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use bugfixes::{
-    ai::AiRegistry, api, config::Config, notifications::NotificationRegistry,
+    ai::AiRegistry, api, config::Config, migrations, notifications::NotificationRegistry,
     repository::Repository, service::IntakeService, ticketing::TicketingRegistry,
 };
 
@@ -12,6 +12,7 @@ async fn main() -> bugfixes::AppResult<()> {
         .init();
 
     let config = Config::from_env()?;
+    migrations::run(&config.database_url)?;
     let repository = Arc::new(Repository::connect(&config).await?);
     let ticketing = Arc::new(TicketingRegistry::default());
     let notifications = Arc::new(NotificationRegistry::default());

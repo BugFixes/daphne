@@ -37,6 +37,34 @@ Environment variables:
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
 - `BUGFIXES_DATABASE_URL` default: `sqlite://bugfixes.db`
 
+## Database Migrations
+
+`bugfix.es` now uses `refinery` as its migration system.
+
+- Migrations live in `migrations/`.
+- The application runs embedded `refinery` migrations during startup before the API begins serving traffic.
+- Migration files should be named like `V1__create_accounts.sql`.
+
+Current state:
+
+- `refinery` is now the migration mechanism and startup entrypoint.
+- The existing schema is still created by repository bootstrap code until the follow-up migration tickets land.
+- That means this change establishes the migration workflow first, and the schema ownership move follows next.
+
+Suggested CLI workflow:
+
+```bash
+cargo install refinery_cli
+refinery migrate --help
+```
+
+When authoring migrations for this project:
+
+- prefer SQL migrations in `migrations/`
+- keep migrations additive and explicit
+- run the app locally to apply pending migrations on startup
+- treat schema bootstrap removal as a separate change once the initial migration exists
+
 ## Example flow
 
 Create an account:
