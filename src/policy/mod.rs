@@ -286,8 +286,8 @@ impl PolicyEngine for Policy2PolicyEngine {
 
 #[derive(Debug, serde::Deserialize)]
 struct Policy2EngineResponse {
+    #[serde(default)]
     result: bool,
     error: Option<String>,
     #[allow(dead_code)]
     trace: Option<Value>,
-}
