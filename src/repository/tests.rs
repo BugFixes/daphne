@@ -2,7 +2,7 @@ use std::env;
 
 use uuid::Uuid;
 
-use crate::config::Config;
+use crate::{config::Config, migrations};
 
 use super::Repository;
 
@@ -22,6 +22,7 @@ async fn enables_foreign_keys_for_every_sqlite_pool_connection() {
         disabled_features: Default::default(),
     };
 
+    migrations::run(&config.database_url).expect("migrations");
     let repository = Repository::connect(&config).await.expect("repository");
     let mut connections = Vec::new();
 

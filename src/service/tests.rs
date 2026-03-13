@@ -1,6 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, env, sync::Arc};
 
 use chrono::Utc;
+use uuid::Uuid;
 
 use crate::{
     ai::AiRegistry,
@@ -10,6 +11,7 @@ use crate::{
         StacktraceEventRequest, TicketAction, TicketPriority, TicketProvider,
     },
     feature_flags::build_feature_flags,
+    migrations,
     notifications::NotificationRegistry,
     policy::build_policy_engine,
     repository::Repository,
@@ -23,9 +25,10 @@ async fn test_service() -> IntakeService {
 }
 
 async fn test_service_with_disabled_features(disabled_features: HashSet<String>) -> IntakeService {
+    let database_path = env::temp_dir().join(format!("bugfixes-service-{}.db", Uuid::new_v4()));
     let config = Config {
         bind_address: "127.0.0.1:0".to_string(),
-        database_url: "sqlite::memory:".to_string(),
+        database_url: format!("sqlite://{}", database_path.display()),
         feature_flags_provider: "local".to_string(),
         policy_provider: "local".to_string(),
         policy2_engine_url: "https://api.policy2.net/run".to_string(),
@@ -34,6 +37,7 @@ async fn test_service_with_disabled_features(disabled_features: HashSet<String>)
         flagsgg_environment_id: None,
         disabled_features,
     };
+    migrations::run(&config.database_url).expect("migrations");
     let repository = Arc::new(Repository::connect(&config).await.expect("repository"));
     let ticketing = Arc::new(TicketingRegistry::default());
     let notifications = Arc::new(NotificationRegistry::default());

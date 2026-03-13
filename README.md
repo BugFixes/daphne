@@ -50,6 +50,13 @@ just test
 just check
 ```
 
+Verification policy:
+
+- run `just check` before pushing changes
+- keep `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-features` passing
+- add or update tests for any behavior change, bug fix, policy change, migration, or API change
+- if a change genuinely cannot be covered by an automated test yet, call that out explicitly in the pull request
+
 Environment variables:
 
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
@@ -219,6 +226,13 @@ BUGFIXES_POLICY2_ENGINE_URL=https://api.policy2.net/run
 The `policy2` client sends the embedded rule text and the policy input payload to the engine. That payload includes stack facts, the chosen provider or advisor, the relevant enablement booleans, and the configured API key where that action requires one.
 
 When `BUGFIXES_POLICY_PROVIDER=policy2`, `policy2` is authoritative for the `true` or `false` decision. The Rust service only supplies facts and performs the operation if policy returns `true`. Use `BUGFIXES_POLICY_PROVIDER=local` only for local development or when you explicitly want the built-in Rust evaluator.
+
+## Contribution Expectations
+
+- do not merge code that leaves `fmt`, `clippy`, or `test` failing
+- treat new functionality and behavior changes as incomplete unless the matching tests are added or updated
+- prefer focused tests near the changed module over broad unstructured regression coverage
+- when fixing a bug, add the test that would have caught it first when practical
 
 ## Next steps
 
