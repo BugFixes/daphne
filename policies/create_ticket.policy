@@ -1,0 +1,23 @@
+# bugfix.es ticket creation policy
+
+A **ticket** is created
+  if the **stack** is new
+  and the **account** has ticketing enabled
+  and the **ticketing** configuration chose a supported provider
+  and the **ticketing** configuration is enabled
+  and the **account** has a ticketing api key.
+
+A **stack** is new
+  if the __hash_exists__ of the **stack** is equal to false.
+
+An **account** has ticketing enabled
+  if the __ticketing_enabled__ of the **account** is equal to true.
+
+The **ticketing** configuration chose a supported provider
+  if the __provider__ of the **ticketing** configuration matches regex "^(jira|github|linear|tracklines)$".
+
+The **ticketing** configuration is enabled
+  if the __enabled__ of the **ticketing** configuration is equal to true.
+
+An **account** has a ticketing api key
+  if the __api_key__ of the **account** matches regex "^.+$".

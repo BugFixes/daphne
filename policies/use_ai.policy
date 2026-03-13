@@ -1,0 +1,20 @@
+# bugfix.es ai usage policy
+
+An **ai** recommendation is requested
+  if the **account** has ai enabled
+  and the **ai** configuration chose a supported advisor
+  and the **ai** configuration is enabled
+  and the **account** is ready to authenticate ai usage.
+
+An **account** has ai enabled
+  if the __enabled__ of the **account** is equal to true.
+
+The **ai** configuration chose a supported advisor
+  if the __advisor__ of the **ai** configuration matches regex "^(codex|claude|kimi)$".
+
+The **ai** configuration is enabled
+  if the __enabled__ of the **ai** configuration is equal to true.
+
+An **account** is ready to authenticate ai usage
+  if the __use_managed__ of the **account** is equal to true
+  or the __api_key__ of the **account** matches regex "^.+$".

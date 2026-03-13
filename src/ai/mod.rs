@@ -32,6 +32,10 @@ impl AiRegistry {
             .cloned()
             .ok_or_else(|| AppError::Internal("default ai advisor not registered".to_string()))
     }
+
+    pub fn default_advisor_key(&self) -> &'static str {
+        self.default_advisor
+    }
 }
 
 impl Default for AiRegistry {

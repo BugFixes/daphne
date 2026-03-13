@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bugfix.es Create Ticket Policy Input",
+  "type": "object",
+  "properties": {
+    "stack": {
+      "type": "object",
+      "properties": {
+        "hash_exists": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hash_exists"
+      ],
+      "additionalProperties": false
+    },
+    "account": {
+      "type": "object",
+      "properties": {
+        "ticketing_enabled": {
+          "type": "boolean"
+        },
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "ticketing_enabled",
+        "api_key"
+      ],
+      "additionalProperties": false
+    },
+    "ticketing": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "jira",
+            "github",
+            "linear",
+            "tracklines"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "enabled"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "stack",
+    "account",
+    "ticketing"
+  ],
+  "additionalProperties": false
+}

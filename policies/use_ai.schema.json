@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bugfix.es Use AI Policy Input",
+  "type": "object",
+  "properties": {
+    "account": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "use_managed": {
+          "type": "boolean"
+        },
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "enabled",
+        "use_managed",
+        "api_key"
+      ],
+      "additionalProperties": false
+    },
+    "ai": {
+      "type": "object",
+      "properties": {
+        "advisor": {
+          "type": "string",
+          "enum": [
+            "codex",
+            "claude",
+            "kimi"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "advisor",
+        "enabled"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "account",
+    "ai"
+  ],
+  "additionalProperties": false
+}
