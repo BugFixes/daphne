@@ -8,7 +8,7 @@ use crate::{
     AppResult,
     ai::AiRegistry,
     domain::{
-        Account, Bug, NotificationOutcome, Severity, StacktraceEventRequest, Ticket, TicketAction,
+        Account, Bug, NotificationOutcome, Severity, StacktraceEvent, Ticket, TicketAction,
         TicketPriority,
     },
     feature_flags::FeatureFlagsClient,
@@ -57,27 +57,20 @@ impl IntakeService {
         }
     }
 
-    pub async fn ingest(
-        &self,
-        request: StacktraceEventRequest,
-    ) -> AppResult<crate::domain::IntakeOutcome> {
-        request.validate()?;
+    pub async fn ingest(&self, event: StacktraceEvent) -> AppResult<crate::domain::IntakeOutcome> {
+        event.validate()?;
 
-        let agent = match request.agent_secret.as_deref() {
+        let agent = match event.agent_secret.as_deref() {
             Some(agent_secret) => {
                 self.repository
-                    .find_agent_by_credentials(&request.agent_key, agent_secret)
+                    .find_agent_by_credentials(&event.agent_key, agent_secret)
                     .await?
             }
-            None => {
-                self.repository
-                    .find_agent_by_key(&request.agent_key)
-                    .await?
-            }
+            None => self.repository.find_agent_by_key(&event.agent_key).await?,
         };
         let account = self.repository.find_account(agent.account_id).await?;
-        let occurred_at = request.occurred_at.unwrap_or_else(Utc::now);
-        let normalized_stacktrace = normalize_stacktrace(&request.stacktrace);
+        let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
+        let normalized_stacktrace = normalize_stacktrace(&event.stacktrace);
         let stacktrace_hash = hash_stacktrace(&normalized_stacktrace);
 
         if let Some(existing_bug) = self
@@ -88,7 +81,7 @@ impl IntakeService {
             self.handle_repeat_bug(
                 account,
                 existing_bug,
-                request,
+                event,
                 normalized_stacktrace,
                 stacktrace_hash,
                 occurred_at,
@@ -98,7 +91,7 @@ impl IntakeService {
             self.handle_new_bug(
                 account,
                 agent.id,
-                request,
+                event,
                 normalized_stacktrace,
                 stacktrace_hash,
                 occurred_at,
@@ -111,7 +104,7 @@ impl IntakeService {
         &self,
         account: Account,
         agent_id: uuid::Uuid,
-        request: StacktraceEventRequest,
+        event: StacktraceEvent,
         normalized_stacktrace: String,
         stacktrace_hash: String,
         occurred_at: DateTime<Utc>,
@@ -121,16 +114,16 @@ impl IntakeService {
             .create_bug(CreateBugRecord {
                 account_id: account.id,
                 agent_id,
-                language: &request.language,
-                severity: request.level,
+                language: &event.language,
+                severity: event.level,
                 stacktrace_hash: &stacktrace_hash,
                 normalized_stacktrace: &normalized_stacktrace,
-                latest_stacktrace: &request.stacktrace,
+                latest_stacktrace: &event.stacktrace,
                 occurred_at,
             })
             .await?;
         self.repository
-            .record_occurrence(bug.id, request.level, &request.stacktrace, occurred_at)
+            .record_occurrence(bug.id, event.level, &event.stacktrace, occurred_at)
             .await?;
 
         let (ticket_action, ticket, ai_recommendation) = if self
@@ -152,15 +145,15 @@ impl IntakeService {
             .await?
         {
             let recommendation = self
-                .recommendation_for(&account, &bug, &request.stacktrace)
+                .recommendation_for(&account, &bug, &event.stacktrace)
                 .await?;
             let ticket = self
                 .create_ticket(
                     &account,
                     &bug,
-                    request.level,
+                    event.level,
                     &recommendation,
-                    &request.stacktrace,
+                    &event.stacktrace,
                     occurred_at,
                 )
                 .await?;
@@ -170,7 +163,7 @@ impl IntakeService {
         };
 
         let notification = self
-            .maybe_notify(&account, &bug, request.level, ticket_action, occurred_at)
+            .maybe_notify(&account, &bug, event.level, ticket_action, occurred_at)
             .await?;
 
         Ok(crate::domain::IntakeOutcome {
@@ -189,27 +182,17 @@ impl IntakeService {
         &self,
         account: Account,
         existing_bug: Bug,
-        request: StacktraceEventRequest,
+        event: StacktraceEvent,
         _normalized_stacktrace: String,
         stacktrace_hash: String,
         occurred_at: DateTime<Utc>,
     ) -> AppResult<crate::domain::IntakeOutcome> {
         self.repository
-            .record_occurrence(
-                existing_bug.id,
-                request.level,
-                &request.stacktrace,
-                occurred_at,
-            )
+            .record_occurrence(existing_bug.id, event.level, &event.stacktrace, occurred_at)
             .await?;
         let bug = self
             .repository
-            .update_bug_on_repeat(
-                &existing_bug,
-                request.level,
-                &request.stacktrace,
-                occurred_at,
-            )
+            .update_bug_on_repeat(&existing_bug, event.level, &event.stacktrace, occurred_at)
             .await?;
         let recent_window = chrono::Duration::from_std(Duration::from_secs(
             (account.rapid_occurrence_window_minutes as u64) * 60,
@@ -244,15 +227,15 @@ impl IntakeService {
                 .await?
         {
             let recommendation = self
-                .recommendation_for(&account, &bug, &request.stacktrace)
+                .recommendation_for(&account, &bug, &event.stacktrace)
                 .await?;
             let created_ticket = self
                 .create_ticket(
                     &account,
                     &bug,
-                    request.level,
+                    event.level,
                     &recommendation,
-                    &request.stacktrace,
+                    &event.stacktrace,
                     occurred_at,
                 )
                 .await?;
@@ -321,7 +304,7 @@ impl IntakeService {
         }
 
         let notification = self
-            .maybe_notify(&account, &bug, request.level, ticket_action, occurred_at)
+            .maybe_notify(&account, &bug, event.level, ticket_action, occurred_at)
             .await?;
 
         Ok(crate::domain::IntakeOutcome {
