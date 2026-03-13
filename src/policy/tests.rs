@@ -1,7 +1,7 @@
 use crate::policy::{
     CreateTicketAccountPolicyInput, CreateTicketPolicyInput, CreateTicketProviderPolicyInput,
     CreateTicketStackPolicyInput, EscalateRepeatBugPolicyInput, EscalateRepeatPolicyInput,
-    EscalateRepeatTicketPolicyInput, LocalPolicyEngine, PolicyEngine,
+    EscalateRepeatTicketPolicyInput, LocalPolicyEngine, Policy2PolicyEngine, PolicyEngine,
     SendNotificationAccountPolicyInput, SendNotificationEventPolicyInput,
     SendNotificationPolicyInput, SendNotificationProviderPolicyInput,
     SendNotificationTicketPolicyInput, UseAiAccountPolicyInput, UseAiAdvisorPolicyInput,
@@ -198,4 +198,30 @@ async fn local_policy_engine_blocks_ticket_creation_when_api_key_is_missing() {
         .expect("result");
 
     assert!(!denied);
+}
+
+#[tokio::test]
+async fn policy2_engine_falls_back_to_local_policy_on_request_failure() {
+    let engine = Policy2PolicyEngine {
+        client: reqwest::Client::new(),
+        endpoint: "http://127.0.0.1:9/run".to_string(),
+        fallback: LocalPolicyEngine,
+    };
+
+    let allowed = engine
+        .should_create_ticket(&CreateTicketPolicyInput {
+            stack: CreateTicketStackPolicyInput { hash_exists: false },
+            account: CreateTicketAccountPolicyInput {
+                ticketing_enabled: true,
+                api_key: Some("jira_key".to_string()),
+            },
+            ticketing: CreateTicketProviderPolicyInput {
+                provider: "jira".to_string(),
+                enabled: true,
+            },
+        })
+        .await
+        .expect("fallback result");
+
+    assert!(allowed);
 }

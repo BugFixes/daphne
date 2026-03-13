@@ -10,6 +10,14 @@ mod embedded {
 }
 
 pub fn run(database_url: &str) -> AppResult<()> {
+    if !is_sqlite_url(database_url) {
+        tracing::info!(
+            database_url,
+            "skipping refinery migrations for non-sqlite database"
+        );
+        return Ok(());
+    }
+
     let mut connection = open_connection(database_url)?;
     let report = embedded::migrations::runner()
         .run(&mut connection)
@@ -25,6 +33,10 @@ pub fn run(database_url: &str) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+fn is_sqlite_url(database_url: &str) -> bool {
+    database_url.starts_with("sqlite:")
 }
 
 fn open_connection(database_url: &str) -> AppResult<Connection> {
@@ -75,4 +87,14 @@ fn configure_sqlite_connection(connection: Connection) -> AppResult<Connection> 
 enum SqliteTarget {
     InMemory,
     File(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::run;
+
+    #[test]
+    fn skips_non_sqlite_urls() {
+        run("postgres://bugfixes:secret@localhost:5432/bugfixes").expect("skip postgres");
+    }
 }

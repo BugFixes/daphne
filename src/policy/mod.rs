@@ -178,6 +178,7 @@ impl PolicyEngine for LocalPolicyEngine {
 pub struct Policy2PolicyEngine {
     client: Client,
     endpoint: String,
+    fallback: LocalPolicyEngine,
 }
 
 impl Policy2PolicyEngine {
@@ -190,6 +191,7 @@ impl Policy2PolicyEngine {
         Ok(Self {
             client,
             endpoint: config.policy2_engine_url.clone(),
+            fallback: LocalPolicyEngine,
         })
     }
 
@@ -239,22 +241,46 @@ impl Policy2PolicyEngine {
 #[async_trait]
 impl PolicyEngine for Policy2PolicyEngine {
     async fn should_create_ticket(&self, input: &CreateTicketPolicyInput) -> AppResult<bool> {
-        self.evaluate(CREATE_TICKET_RULE, input).await
+        match self.evaluate(CREATE_TICKET_RULE, input).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                self.fallback.should_create_ticket(input).await
+            }
+        }
     }
 
     async fn should_escalate_repeat(&self, input: &EscalateRepeatPolicyInput) -> AppResult<bool> {
-        self.evaluate(ESCALATE_REPEAT_RULE, input).await
+        match self.evaluate(ESCALATE_REPEAT_RULE, input).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                self.fallback.should_escalate_repeat(input).await
+            }
+        }
     }
 
     async fn should_send_notification(
         &self,
         input: &SendNotificationPolicyInput,
     ) -> AppResult<bool> {
-        self.evaluate(SEND_NOTIFICATION_RULE, input).await
+        match self.evaluate(SEND_NOTIFICATION_RULE, input).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                self.fallback.should_send_notification(input).await
+            }
+        }
     }
 
     async fn should_use_ai(&self, input: &UseAiPolicyInput) -> AppResult<bool> {
-        self.evaluate(USE_AI_RULE, input).await
+        match self.evaluate(USE_AI_RULE, input).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                self.fallback.should_use_ai(input).await
+            }
+        }
     }
 }
 
