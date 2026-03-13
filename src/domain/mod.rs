@@ -30,10 +30,6 @@ impl Severity {
             Self::Fatal => 5,
         }
     }
-
-    pub fn should_notify(self, min: Self) -> bool {
-        self.rank() >= min.rank()
-    }
 }
 
 impl fmt::Display for Severity {
@@ -156,6 +152,15 @@ impl TicketPriority {
         }
     }
 
+    pub fn rank(self) -> u8 {
+        match self {
+            Self::Low => 1,
+            Self::Medium => 2,
+            Self::High => 3,
+            Self::Critical => 4,
+        }
+    }
+
     pub fn escalated(self) -> Self {
         match self {
             Self::Low => Self::Medium,
@@ -199,7 +204,12 @@ pub struct Account {
     pub name: String,
     pub create_tickets: bool,
     pub ticket_provider: TicketProvider,
+    pub ticketing_api_key: Option<String>,
     pub notification_provider: NotificationProvider,
+    pub notification_api_key: Option<String>,
+    pub ai_enabled: bool,
+    pub use_managed_ai: bool,
+    pub ai_api_key: Option<String>,
     pub notify_min_level: Severity,
     pub rapid_occurrence_window_minutes: i64,
     pub rapid_occurrence_threshold: i64,
@@ -257,7 +267,17 @@ pub struct CreateAccountRequest {
     pub name: String,
     pub create_tickets: bool,
     pub ticket_provider: TicketProvider,
+    #[serde(default)]
+    pub ticketing_api_key: Option<String>,
     pub notification_provider: NotificationProvider,
+    #[serde(default)]
+    pub notification_api_key: Option<String>,
+    #[serde(default = "default_true")]
+    pub ai_enabled: bool,
+    #[serde(default = "default_true")]
+    pub use_managed_ai: bool,
+    #[serde(default)]
+    pub ai_api_key: Option<String>,
     pub notify_min_level: Severity,
     pub rapid_occurrence_window_minutes: i64,
     pub rapid_occurrence_threshold: i64,
@@ -282,6 +302,10 @@ impl CreateAccountRequest {
         }
         Ok(())
     }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,6 +389,19 @@ pub enum TicketAction {
     Commented,
     Unchanged,
     Skipped,
+}
+
+impl fmt::Display for TicketAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Created => "created",
+            Self::Escalated => "escalated",
+            Self::Commented => "commented",
+            Self::Unchanged => "unchanged",
+            Self::Skipped => "skipped",
+        };
+        write!(f, "{value}")
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

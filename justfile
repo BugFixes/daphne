@@ -13,6 +13,9 @@ clippy:
     cargo clippy --all-targets --all-features -- -D warnings
 
 test:
-    cargo test
+    cargo test --all-features
+
+migrate:
+    cargo run
 
 check: fmt clippy test

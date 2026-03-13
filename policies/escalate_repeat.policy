@@ -1,0 +1,15 @@
+# bugfix.es repeat escalation policy
+
+A **bug** escalates a repeated ticket
+  if the **bug** already has a ticket
+  and the **bug** exceeded the rapid repeat threshold
+  and the **ticket** can still increase priority.
+
+A **bug** already has a ticket
+  if the __has_ticket__ of the **bug** is equal to true.
+
+A **bug** exceeded the rapid repeat threshold
+  if the __recent_count__ of the **bug** is greater than or equal to the __rapid_occurrence_threshold__ of the **bug**.
+
+The **ticket** can still increase priority
+  if the __next_priority_rank__ of the **ticket** is greater than the __current_priority_rank__ of the **ticket**.

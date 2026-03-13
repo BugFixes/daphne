@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bugfix.es Send Notification Policy Input",
+  "type": "object",
+  "properties": {
+    "event": {
+      "type": "object",
+      "properties": {
+        "rank": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "rank"
+      ],
+      "additionalProperties": false
+    },
+    "account": {
+      "type": "object",
+      "properties": {
+        "notify_min_rank": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "api_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "notify_min_rank",
+        "api_key"
+      ],
+      "additionalProperties": false
+    },
+    "notification": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "slack",
+            "teams",
+            "resend"
+          ]
+        },
+        "enabled": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "enabled"
+      ],
+      "additionalProperties": false
+    },
+    "ticket": {
+      "type": "object",
+      "properties": {
+        "action": {
+          "type": "string",
+          "enum": [
+            "created",
+            "escalated",
+            "commented",
+            "unchanged",
+            "skipped"
+          ]
+        }
+      },
+      "required": [
+        "action"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "event",
+    "account",
+    "notification",
+    "ticket"
+  ],
+  "additionalProperties": false
+}

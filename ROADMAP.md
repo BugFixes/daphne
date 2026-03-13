@@ -24,12 +24,16 @@ Dates in this file are intentionally provisional until we convert them into comm
 Status as of `2026-03-08`:
 
 - Rust service scaffold exists.
-- SQLite-backed persistence exists.
+- SQLite and Postgres are both supported through the repository layer.
+- SQL migrations exist.
 - Core intake flow exists: dedupe, ticket create/update, AI recommendation stub, notification stub.
 - Go agent contract is supported on `/v1/log` and `/v1/bug`.
 - Rust agent contract is compatible with the same endpoints.
+- Feature-flag wiring exists with local flags and optional `flags.gg` support.
+- Policy wiring exists with embedded rule files, a local evaluator, and optional `policy2` engine delegation.
+- Provider rollout flags are aligned to the active `flags.gg` keys: `jira`, `github`, `linear`, `tracklines`, `slack`, `teams`, `resend`.
 - Provider implementations are still stubs.
-- Module structure still needs to be reorganized into clearer provider groups.
+- Provider code is grouped into `ticketing/*`, `notifications/*`, and `ai/*`.
 
 ## Delivery Phases
 
@@ -61,7 +65,7 @@ Exit criteria:
 - CI runs format, clippy, and tests on pull requests
 
 Status:
-- `planned`
+- `completed`
 
 ### Phase 1: Core Product Readiness
 
@@ -70,11 +74,13 @@ Goal:
 
 Scope:
 - improve stacktrace normalization
-- add migrations instead of schema-on-start only
 - add configuration for provider credentials
 - add structured audit history for ticket updates and notifications
 - add better error handling around external provider failures
 - add end-to-end integration tests
+- add Postgres validation coverage
+- move more hard-coded workflow decisions behind `policy2` where boolean policies are sufficient
+- decide when SQLite and Postgres diverge operationally
 
 Target window:
 - estimate: `1-2 weeks`
@@ -87,6 +93,8 @@ Exit criteria:
 - local development flow is stable
 - schemas are versioned
 - intake behavior is deterministic and test-covered
+- database changes are migration-driven
+- policy-backed decisions are in place for ticket creation, notification gating, and repeat escalation
 
 Status:
 - `planned`
@@ -101,6 +109,7 @@ Scope:
 - Slack notifications
 - GitHub Issues ticketing
 - Teams notifications
+- keep those providers dark-launched behind `flags.gg` until the external adapters are production-ready
 
 Recommended order:
 1. Jira
@@ -253,19 +262,19 @@ Use this section when we are ready to convert estimates into actual delivery dat
 - Do we want one generic notification abstraction plus typed providers, or separate internal paths for chat and email?
 - When do we replace SQLite with Postgres for multi-tenant production use?
 - Should AI recommendations be synchronous on intake, or queued asynchronously after ticket creation?
+- Which integrations should ship behind `flags.gg` by default versus local always-on flags?
 
 ## Near-Term Next Steps
 
-1. Refactor the source layout into `ticketing/*`, `notifications/*`, and `ai/*`.
-2. Standardize verification through `just fmt`, `just clippy`, `just test`, and `just check`.
-3. Enforce the same verification in GitHub Actions before merge.
-4. Add a migrations strategy.
-5. Implement Jira as the first real ticketing provider.
-6. Implement Slack as the first real notification provider.
-7. Turn this roadmap into dated milestones once Phase 0 is finished.
+1. Add integration-specific feature-flag defaults for dark launches.
+2. Add Postgres-backed validation coverage in CI or a scheduled workflow.
+3. Implement Jira as the first real ticketing provider.
+4. Implement Slack as the first real notification provider.
+5. Turn this roadmap into dated milestones once Phase 1 is decomposed.
 
 ## Change Log
 
 - `2026-03-08`: initial roadmap created
 - `2026-03-08`: added repo verification workflow and `justfile` requirement
 - `2026-03-08`: added GitHub Actions requirement for pre-merge verification
+- `2026-03-08`: added Postgres support, SQL migrations, and optional `flags.gg` feature flags

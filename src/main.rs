@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use bugfixes::{
-    ai::AiRegistry, api, config::Config, migrations, notifications::NotificationRegistry,
-    repository::Repository, service::IntakeService, ticketing::TicketingRegistry,
+    ai::AiRegistry, api, config::Config, feature_flags::build_feature_flags, migrations,
+    notifications::NotificationRegistry, policy::build_policy_engine, repository::Repository,
+    service::IntakeService, ticketing::TicketingRegistry,
 };
 
 #[tokio::main]
@@ -17,11 +18,15 @@ async fn main() -> bugfixes::AppResult<()> {
     let ticketing = Arc::new(TicketingRegistry::default());
     let notifications = Arc::new(NotificationRegistry::default());
     let ai = Arc::new(AiRegistry::default());
+    let feature_flags = build_feature_flags(&config)?;
+    let policy_engine = build_policy_engine(&config)?;
     let intake_service = Arc::new(IntakeService::new(
         repository.clone(),
         ticketing,
         notifications,
         ai,
+        feature_flags,
+        policy_engine,
     ));
 
     let app = api::router(repository, intake_service);

@@ -13,4 +13,4 @@ Operational model:
 
 - the application embeds migrations at compile time
 - pending migrations run during startup before the API begins serving traffic
-- the existing schema bootstrap code remains in place until the initial migration conversion lands
+- migration SQL imported from other branches should be renamed to the `V{N}__description.sql` format

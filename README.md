@@ -7,6 +7,8 @@
 - notify users only when the account severity threshold says it should
 - escalate or comment on the existing ticket when the bug repeats
 
+Ticketing, notification, and AI execution are policy-gated from raw account context. The service sends the chosen provider or advisor, whether that integration is enabled, and any configured credential to the policy engine, and the policy decides whether the action is allowed.
+
 This repository is a fresh implementation. The abandoned Go prototype in `../celeste` was used only as a reference for system boundaries.
 
 ## What exists now
@@ -20,11 +22,18 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 
 The current providers are local stubs for:
 
-- ticketing: `jira`, `linear`, `tracklines`
+- ticketing: `jira`, `github`, `linear`, `tracklines`
 - notifications: `slack`, `teams`, `resend`
-- AI: heuristic recommendation generator
+- AI: `codex`, `claude`, `kimi`
 
 Those stubs let the full workflow run end-to-end before wiring real external APIs.
+
+The service now supports both:
+
+- SQLite for local development and tests
+- Postgres for non-local environments
+
+Schema setup is handled through SQL migrations in [`migrations/`](./migrations).
 
 ## Run
 
@@ -32,10 +41,28 @@ Those stubs let the full workflow run end-to-end before wiring real external API
 cargo run
 ```
 
+Common repo tasks:
+
+```bash
+just fmt
+just clippy
+just test
+just check
+```
+
 Environment variables:
 
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
 - `BUGFIXES_DATABASE_URL` default: `sqlite://bugfixes.db`
+- `BUGFIXES_FEATURE_FLAGS_PROVIDER` default: `local`
+- `BUGFIXES_POLICY_PROVIDER` default: `local`
+- `BUGFIXES_POLICY2_ENGINE_URL` default: `https://api.policy2.net/run`
+- `BUGFIXES_DISABLED_FEATURES` optional comma-separated local disable list
+- `BUGFIXES_FLAGSGG_PROJECT_ID` optional when using `flagsgg`
+- `BUGFIXES_FLAGSGG_AGENT_ID` optional when using `flagsgg`
+- `BUGFIXES_FLAGSGG_ENVIRONMENT_ID` optional when using `flagsgg`
+
+Use `.env.example` as the configuration reference.
 
 ## Database Migrations
 
@@ -48,8 +75,8 @@ Environment variables:
 Current state:
 
 - `refinery` is now the migration mechanism and startup entrypoint.
-- The existing schema is still created by repository bootstrap code until the follow-up migration tickets land.
-- That means this change establishes the migration workflow first, and the schema ownership move follows next.
+- Migration SQL lives in `migrations/` and runs before repository startup.
+- Repository bootstrap should not own schema creation going forward.
 
 Suggested CLI workflow:
 
@@ -63,7 +90,7 @@ When authoring migrations for this project:
 - prefer SQL migrations in `migrations/`
 - keep migrations additive and explicit
 - run the app locally to apply pending migrations on startup
-- treat schema bootstrap removal as a separate change once the initial migration exists
+- use the `V{N}__description.sql` naming convention that `refinery` expects
 
 ## Example flow
 
@@ -76,7 +103,11 @@ curl -X POST http://127.0.0.1:3000/v1/accounts \
     "name": "Acme",
     "create_tickets": true,
     "ticket_provider": "jira",
+    "ticketing_api_key": "jira_test_key",
     "notification_provider": "slack",
+    "notification_api_key": "slack_webhook_or_key",
+    "ai_enabled": true,
+    "use_managed_ai": true,
     "notify_min_level": "error",
     "rapid_occurrence_window_minutes": 30,
     "rapid_occurrence_threshold": 3
@@ -142,10 +173,57 @@ curl -X POST http://127.0.0.1:3000/v1/bug \
 - `tickets` store the external issue reference plus AI recommendation and current priority.
 - `notifications` and `ticket_comments` keep a local audit trail.
 
+## Feature Flags
+
+Feature flags can be used to dark-launch integrations and AI providers.
+
+Current provider flag keys:
+
+- `jira`
+- `github`
+- `linear`
+- `tracklines`
+- `slack`
+- `teams`
+- `resend`
+
+Current AI flag key:
+
+- `ai/codex`
+
+By default the service uses local always-on flags with optional disables via `BUGFIXES_DISABLED_FEATURES`. Local disables accept the bare provider names above and still accept the older namespaced values for compatibility.
+
+If you want runtime flags from `flags.gg`, build with:
+
+```bash
+cargo run --features flagsgg
+```
+
+and set the `BUGFIXES_FLAGSGG_*` environment variables.
+
+## Policies
+
+Business decisions can now run locally or through `policy2`.
+
+Current embedded policies live in [`policies/create_ticket.policy`](./policies/create_ticket.policy), [`policies/escalate_repeat.policy`](./policies/escalate_repeat.policy), [`policies/send_notification.policy`](./policies/send_notification.policy), and [`policies/use_ai.policy`](./policies/use_ai.policy).
+
+Matching JSON Schemas for those `decision` payloads live in [`policies/create_ticket.schema.json`](./policies/create_ticket.schema.json), [`policies/escalate_repeat.schema.json`](./policies/escalate_repeat.schema.json), [`policies/send_notification.schema.json`](./policies/send_notification.schema.json), and [`policies/use_ai.schema.json`](./policies/use_ai.schema.json).
+
+By default the service uses a local policy engine that preserves the current Rust behavior. To delegate those checks to `policy2`, set:
+
+```bash
+BUGFIXES_POLICY_PROVIDER=policy2
+BUGFIXES_POLICY2_ENGINE_URL=https://api.policy2.net/run
+```
+
+The `policy2` client sends the embedded rule text and the policy input payload to the engine. That payload includes stack facts, the chosen provider or advisor, the relevant enablement booleans, and the configured API key where that action requires one.
+
+When `BUGFIXES_POLICY_PROVIDER=policy2`, `policy2` is authoritative for the `true` or `false` decision. The Rust service only supplies facts and performs the operation if policy returns `true`. Use `BUGFIXES_POLICY_PROVIDER=local` only for local development or when you explicitly want the built-in Rust evaluator.
+
 ## Next steps
 
-- replace stub ticketing providers with Jira, Linear, and Tracklines clients
-- replace the heuristic AI advisor with a real model-backed implementation
+- replace stub ticketing providers with Jira, GitHub Issues, Linear, and Tracklines clients
+- replace stub AI advisors with real model-backed Codex, Claude, and Kimi integrations
 - add account-specific provider credentials and webhook targets
 - add richer normalization per language runtime so equivalent traces hash together more reliably
 - add request fixtures derived from `../go-bugfixes` so the agent and service contract stays locked together

@@ -29,8 +29,14 @@ pub fn run(database_url: &str) -> AppResult<()> {
 
 fn open_connection(database_url: &str) -> AppResult<Connection> {
     match sqlite_target(database_url)? {
-        SqliteTarget::InMemory => Connection::open_in_memory().map_err(map_rusqlite_error),
-        SqliteTarget::File(path) => Connection::open(path).map_err(map_rusqlite_error),
+        SqliteTarget::InMemory => {
+            let connection = Connection::open_in_memory().map_err(map_rusqlite_error)?;
+            configure_sqlite_connection(connection)
+        }
+        SqliteTarget::File(path) => {
+            let connection = Connection::open(path).map_err(map_rusqlite_error)?;
+            configure_sqlite_connection(connection)
+        }
     }
 }
 
@@ -57,6 +63,13 @@ fn map_rusqlite_error(error: rusqlite::Error) -> AppError {
     AppError::Internal(format!(
         "failed to open sqlite database for migrations: {error}"
     ))
+}
+
+fn configure_sqlite_connection(connection: Connection) -> AppResult<Connection> {
+    connection
+        .pragma_update(None, "foreign_keys", "ON")
+        .map_err(map_rusqlite_error)?;
+    Ok(connection)
 }
 
 enum SqliteTarget {
