@@ -14,7 +14,7 @@ use crate::{
     migrations,
     notifications::NotificationRegistry,
     policy::build_policy_engine,
-    repository::Repository,
+    repository::{CreateBugRecord, Repository},
     ticketing::TicketingRegistry,
 };
 
@@ -384,4 +384,79 @@ async fn skips_ai_when_account_uses_customer_managed_ai_without_api_key() {
         response.ai_recommendation.as_deref(),
         Some("AI recommendation skipped by policy.")
     );
+}
+
+#[tokio::test]
+async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Eta".to_string(),
+            create_tickets: true,
+            ticket_provider: TicketProvider::Jira,
+            ticketing_api_key: Some("jira_test_key".to_string()),
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Error,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let stacktrace = "panic: missing ticket for existing bug";
+    let normalized_stacktrace = super::normalize_stacktrace(stacktrace);
+    let stacktrace_hash = super::hash_stacktrace(&normalized_stacktrace);
+    let occurred_at = Utc::now();
+
+    let bug = service
+        .repository
+        .create_bug(CreateBugRecord {
+            account_id: account.id,
+            agent_id: agent.id,
+            language: "rust",
+            severity: Severity::Error,
+            stacktrace_hash: &stacktrace_hash,
+            normalized_stacktrace: &normalized_stacktrace,
+            latest_stacktrace: stacktrace,
+            occurred_at,
+        })
+        .await
+        .expect("bug");
+    service
+        .repository
+        .record_occurrence(bug.id, Severity::Error, stacktrace, occurred_at)
+        .await
+        .expect("occurrence");
+
+    let response = service
+        .ingest(StacktraceEventRequest {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            stacktrace: stacktrace.to_string(),
+            level: Severity::Error,
+            occurred_at: Some(occurred_at + chrono::Duration::minutes(5)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("repeat ingest");
+
+    assert!(!response.is_new_bug);
+    assert_eq!(response.ticket_action, TicketAction::Created);
+    assert!(response.ticket.is_some());
+    assert_eq!(response.occurrence_count, 2);
 }

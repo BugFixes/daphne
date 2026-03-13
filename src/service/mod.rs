@@ -228,7 +228,7 @@ impl IntakeService {
             && self
                 .policy_engine
                 .should_create_ticket(&CreateTicketPolicyInput {
-                    stack: CreateTicketStackPolicyInput { hash_exists: true },
+                    stack: CreateTicketStackPolicyInput { hash_exists: false },
                     account: CreateTicketAccountPolicyInput {
                         ticketing_enabled: account.create_tickets,
                         api_key: account.ticketing_api_key.clone(),
