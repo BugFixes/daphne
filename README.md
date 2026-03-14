@@ -175,6 +175,34 @@ The intake model is stacktrace-first:
 - canonical stacktrace events are the service input used for hashing, deduplication, and workflow decisions
 - bugs, occurrences, tickets, and notifications are derived from those canonical stacktrace events
 
+## Canonical bug identity
+
+A deduplicated bug is currently defined by the tuple `account_id + stacktrace_hash`.
+
+`stacktrace_hash` is derived as `sha256(normalize(stacktrace))`. The current normalization trims each line, drops empty lines, and replaces hex memory addresses with `0xADDR` before hashing.
+
+Field roles in the canonical event:
+
+- transport and authentication only: `agent_key`, `agent_secret`
+- bug identity primitive: `stacktrace`
+- occurrence-level metadata: `level`, `occurred_at`, `service`, `environment`, `attributes`
+
+Fields derived or materialized downstream from those primitives:
+
+- `normalized_stacktrace` stores the canonicalized form of the raw `stacktrace`
+- `stacktrace_hash` stores the hash of `normalized_stacktrace`
+- `first_seen_at` comes from the occurrence that created the bug
+- `last_seen_at` comes from the most recent occurrence for the bug
+- `occurrence_count` is the count of stored occurrences for the bug
+- `severity` is the highest severity seen for the bug so far
+- `latest_stacktrace` is the newest raw stacktrace stored for the bug
+
+Current bug record semantics that are easy to miss:
+
+- `language` is stored on the bug, but it is copied from the first occurrence and is not part of deduplication
+- `agent_id` is also copied from the first occurrence that created the bug
+- `service`, `environment`, and `attributes` are accepted on canonical events but do not currently participate in deduplication or persistence
+
 ## Data model
 
 - `accounts` own the policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
