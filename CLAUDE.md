@@ -25,7 +25,7 @@ Run `just check` (or its cargo equivalent) before pushing. All three checks — 
 ```
 api/          HTTP routes and handlers (Axum)
 service/      IntakeService — core workflow orchestration
-repository/   Database operations (SQLite + Postgres via SQLx)
+repository/   Database operations (Postgres via SQLx)
 domain/       Data models and types
 ticketing/    Pluggable ticketing providers (Jira, GitHub, Linear, Tracklines)
 notifications/ Pluggable notification providers (Slack, Teams, Resend)
@@ -53,8 +53,7 @@ All three provider categories (ticketing, notifications, AI) follow the same pat
 
 ## Database
 
-- **Development / tests**: SQLite (default `sqlite://bugfixes.db`; in-memory for tests)
-- **Production**: Postgres (set `BUGFIXES_DATABASE_URL`)
+- **Development / tests / production**: Postgres (default `postgres://postgres:postgres@127.0.0.1:5432/bugfixes` via `BUGFIXES_DATABASE_URL`)
 - **Migrations**: Refinery, embedded at compile time, run at startup before serving traffic
 - Migration files live in `migrations/`, named `V{N}__description.sql`
 - Migrations are additive and forward-only
@@ -83,7 +82,7 @@ Two implementations, selected by `BUGFIXES_FEATURE_FLAGS_PROVIDER`:
 | Variable | Default | Notes |
 |---|---|---|
 | `BUGFIXES_BIND_ADDRESS` | `127.0.0.1:3000` | |
-| `BUGFIXES_DATABASE_URL` | `sqlite://bugfixes.db` | Use `postgres://...` for Postgres |
+| `BUGFIXES_DATABASE_URL` | `postgres://postgres:postgres@127.0.0.1:5432/bugfixes` | Used for Postgres in all environments |
 | `BUGFIXES_FEATURE_FLAGS_PROVIDER` | `local` | `local` or `flagsgg` |
 | `BUGFIXES_POLICY_PROVIDER` | `local` | `local` or `policy2` |
 | `BUGFIXES_POLICY2_ENGINE_URL` | `https://api.policy2.net/run` | Only when using `policy2` |

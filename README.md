@@ -28,10 +28,7 @@ The current providers are local stubs for:
 
 Those stubs let the full workflow run end-to-end before wiring real external APIs.
 
-The service now supports both:
-
-- SQLite for local development and tests
-- Postgres for non-local environments
+The service uses Postgres for all environments, including local development, tests, and production.
 
 Schema setup is handled through SQL migrations in [`migrations/`](./migrations).
 
