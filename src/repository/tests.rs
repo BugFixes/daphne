@@ -9,11 +9,10 @@ use super::Repository;
 async fn connects_to_postgres_after_running_migrations() {
     let config = Config::from_env().expect("config");
     let repository = Repository::connect(&config).await.expect("repository");
-    let migration_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM refinery_schema_history")
-            .fetch_one(&repository.pool)
-            .await
-            .expect("migration count");
+    let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM refinery_schema_history")
+        .fetch_one(&repository.pool)
+        .await
+        .expect("migration count");
 
     assert!(migration_count >= 2);
 }

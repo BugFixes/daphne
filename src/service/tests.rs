@@ -2,7 +2,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use chrono::Utc;
 use serial_test::serial;
-use sqlx::{AnyPool, any::AnyPoolOptions};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::{
     ai::AiRegistry,
@@ -39,8 +39,7 @@ fn test_config(disabled_features: HashSet<String>) -> Config {
 }
 
 async fn reset_database(database_url: &str) {
-    sqlx::any::install_default_drivers();
-    let pool: AnyPool = AnyPoolOptions::new()
+    let pool: PgPool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
         .await

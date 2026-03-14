@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use sqlx::{Any, AnyPool, FromRow, QueryBuilder, any::AnyPoolOptions};
+use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use crate::{
@@ -19,7 +19,7 @@ mod tests;
 
 #[derive(Clone)]
 pub struct Repository {
-    pool: AnyPool,
+    pool: PgPool,
 }
 
 pub struct CreateBugRecord<'a> {
@@ -49,7 +49,7 @@ impl Repository {
         sqlx::any::install_default_drivers();
         migrations::run(&config.database_url).await?;
 
-        let pool = AnyPoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(&config.database_url)
             .await?;
@@ -75,27 +75,24 @@ impl Repository {
             rapid_occurrence_threshold: request.rapid_occurrence_threshold,
         };
 
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO accounts (id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(account.id.to_string());
-            separated.push_bind(account.name.clone());
-            separated.push_bind(account.create_tickets as i64);
-            separated.push_bind(account.ticket_provider.to_string());
-            separated.push_bind(account.ticketing_api_key.clone());
-            separated.push_bind(account.notification_provider.to_string());
-            separated.push_bind(account.notification_api_key.clone());
-            separated.push_bind(account.ai_enabled as i64);
-            separated.push_bind(account.use_managed_ai as i64);
-            separated.push_bind(account.ai_api_key.clone());
-            separated.push_bind(account.notify_min_level.to_string());
-            separated.push_bind(account.rapid_occurrence_window_minutes);
-            separated.push_bind(account.rapid_occurrence_threshold);
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO accounts (id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+        )
+        .bind(account.id.to_string())
+        .bind(account.name.clone())
+        .bind(account.create_tickets as i32)
+        .bind(account.ticket_provider.to_string())
+        .bind(account.ticketing_api_key.clone())
+        .bind(account.notification_provider.to_string())
+        .bind(account.notification_api_key.clone())
+        .bind(account.ai_enabled as i32)
+        .bind(account.use_managed_ai as i32)
+        .bind(account.ai_api_key.clone())
+        .bind(account.notify_min_level.to_string())
+        .bind(account.rapid_occurrence_window_minutes as i32)
+        .bind(account.rapid_occurrence_threshold as i32)
+        .execute(&self.pool)
+        .await?;
 
         Ok(account)
     }
@@ -112,30 +109,25 @@ impl Repository {
             api_secret: Uuid::new_v4().simple().to_string(),
         };
 
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO agents (id, account_id, name, api_key, api_secret) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(agent.id.to_string());
-            separated.push_bind(agent.account_id.to_string());
-            separated.push_bind(agent.name.clone());
-            separated.push_bind(agent.api_key.clone());
-            separated.push_bind(agent.api_secret.clone());
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO agents (id, account_id, name, api_key, api_secret) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(agent.id.to_string())
+        .bind(agent.account_id.to_string())
+        .bind(agent.name.clone())
+        .bind(agent.api_key.clone())
+        .bind(agent.api_secret.clone())
+        .execute(&self.pool)
+        .await?;
 
         Ok(agent)
     }
 
     pub async fn find_account(&self, account_id: Uuid) -> AppResult<Account> {
-        let mut query = QueryBuilder::<Any>::new(
-            "SELECT id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = ",
-        );
-        query.push_bind(account_id.to_string());
-        let row = query
-            .build_query_as::<AccountRow>()
+        let row = sqlx::query_as::<_, AccountRow>(
+            "SELECT id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = $1",
+        )
+            .bind(account_id.to_string())
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(|| AppError::NotFound(format!("account {account_id}")))?;
@@ -144,15 +136,13 @@ impl Repository {
     }
 
     pub async fn find_agent_by_key(&self, api_key: &str) -> AppResult<Agent> {
-        let mut query = QueryBuilder::<Any>::new(
-            "SELECT id, account_id, name, api_key, api_secret FROM agents WHERE api_key = ",
-        );
-        query.push_bind(api_key);
-        let row = query
-            .build_query_as::<AgentRow>()
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound("agent for provided key".to_string()))?;
+        let row = sqlx::query_as::<_, AgentRow>(
+            "SELECT id, account_id, name, api_key, api_secret FROM agents WHERE api_key = $1",
+        )
+        .bind(api_key)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("agent for provided key".to_string()))?;
 
         row.try_into()
     }
@@ -162,14 +152,11 @@ impl Repository {
         api_key: &str,
         api_secret: &str,
     ) -> AppResult<Agent> {
-        let mut query = QueryBuilder::<Any>::new(
-            "SELECT id, account_id, name, api_key, api_secret FROM agents WHERE api_key = ",
-        );
-        query.push_bind(api_key);
-        query.push(" AND api_secret = ");
-        query.push_bind(api_secret);
-        let row = query
-            .build_query_as::<AgentRow>()
+        let row = sqlx::query_as::<_, AgentRow>(
+            "SELECT id, account_id, name, api_key, api_secret FROM agents WHERE api_key = $1 AND api_secret = $2",
+        )
+            .bind(api_key)
+            .bind(api_secret)
             .fetch_optional(&self.pool)
             .await?
             .ok_or_else(|| AppError::NotFound("agent for provided credentials".to_string()))?;
@@ -182,15 +169,11 @@ impl Repository {
         account_id: Uuid,
         stacktrace_hash: &str,
     ) -> AppResult<Option<Bug>> {
-        let mut query = QueryBuilder::<Any>::new(
-            "SELECT id, account_id, agent_id, language, severity, stacktrace_hash, normalized_stacktrace, latest_stacktrace, first_seen_at, last_seen_at, occurrence_count FROM bugs WHERE account_id = ",
-        );
-        query.push_bind(account_id.to_string());
-        query.push(" AND stacktrace_hash = ");
-        query.push_bind(stacktrace_hash);
-
-        query
-            .build_query_as::<BugRow>()
+        sqlx::query_as::<_, BugRow>(
+            "SELECT id, account_id, agent_id, language, severity, stacktrace_hash, normalized_stacktrace, latest_stacktrace, first_seen_at, last_seen_at, occurrence_count FROM bugs WHERE account_id = $1 AND stacktrace_hash = $2",
+        )
+            .bind(account_id.to_string())
+            .bind(stacktrace_hash)
             .fetch_optional(&self.pool)
             .await?
             .map(TryInto::try_into)
@@ -212,25 +195,22 @@ impl Repository {
             occurrence_count: 1,
         };
 
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO bugs (id, account_id, agent_id, language, severity, stacktrace_hash, normalized_stacktrace, latest_stacktrace, first_seen_at, last_seen_at, occurrence_count) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(bug.id.to_string());
-            separated.push_bind(bug.account_id.to_string());
-            separated.push_bind(bug.agent_id.to_string());
-            separated.push_bind(bug.language.clone());
-            separated.push_bind(bug.severity.to_string());
-            separated.push_bind(bug.stacktrace_hash.clone());
-            separated.push_bind(bug.normalized_stacktrace.clone());
-            separated.push_bind(bug.latest_stacktrace.clone());
-            separated.push_bind(bug.first_seen_at.to_rfc3339());
-            separated.push_bind(bug.last_seen_at.to_rfc3339());
-            separated.push_bind(bug.occurrence_count);
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO bugs (id, account_id, agent_id, language, severity, stacktrace_hash, normalized_stacktrace, latest_stacktrace, first_seen_at, last_seen_at, occurrence_count) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+        )
+        .bind(bug.id.to_string())
+        .bind(bug.account_id.to_string())
+        .bind(bug.agent_id.to_string())
+        .bind(bug.language.clone())
+        .bind(bug.severity.to_string())
+        .bind(bug.stacktrace_hash.clone())
+        .bind(bug.normalized_stacktrace.clone())
+        .bind(bug.latest_stacktrace.clone())
+        .bind(bug.first_seen_at.to_rfc3339())
+        .bind(bug.last_seen_at.to_rfc3339())
+        .bind(bug.occurrence_count as i32)
+        .execute(&self.pool)
+        .await?;
 
         Ok(bug)
     }
@@ -242,19 +222,16 @@ impl Repository {
         stacktrace: &str,
         occurred_at: DateTime<Utc>,
     ) -> AppResult<()> {
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO occurrences (id, bug_id, severity, stacktrace, occurred_at) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(Uuid::new_v4().to_string());
-            separated.push_bind(bug_id.to_string());
-            separated.push_bind(severity.to_string());
-            separated.push_bind(stacktrace);
-            separated.push_bind(occurred_at.to_rfc3339());
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO occurrences (id, bug_id, severity, stacktrace, occurred_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(bug_id.to_string())
+        .bind(severity.to_string())
+        .bind(stacktrace)
+        .bind(occurred_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
 
         Ok(())
     }
@@ -273,17 +250,16 @@ impl Repository {
         };
         let occurrence_count = bug.occurrence_count + 1;
 
-        let mut query = QueryBuilder::<Any>::new("UPDATE bugs SET severity = ");
-        query.push_bind(effective_severity.to_string());
-        query.push(", latest_stacktrace = ");
-        query.push_bind(latest_stacktrace);
-        query.push(", last_seen_at = ");
-        query.push_bind(occurred_at.to_rfc3339());
-        query.push(", occurrence_count = ");
-        query.push_bind(occurrence_count);
-        query.push(" WHERE id = ");
-        query.push_bind(bug.id.to_string());
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "UPDATE bugs SET severity = $1, latest_stacktrace = $2, last_seen_at = $3, occurrence_count = $4 WHERE id = $5",
+        )
+        .bind(effective_severity.to_string())
+        .bind(latest_stacktrace)
+        .bind(occurred_at.to_rfc3339())
+        .bind(occurrence_count as i32)
+        .bind(bug.id.to_string())
+        .execute(&self.pool)
+        .await?;
 
         Ok(Bug {
             id: bug.id,
@@ -305,15 +281,13 @@ impl Repository {
         bug_id: Uuid,
         since: DateTime<Utc>,
     ) -> AppResult<i64> {
-        let mut query =
-            QueryBuilder::<Any>::new("SELECT COUNT(*) AS count FROM occurrences WHERE bug_id = ");
-        query.push_bind(bug_id.to_string());
-        query.push(" AND occurred_at >= ");
-        query.push_bind(since.to_rfc3339());
-        let row = query
-            .build_query_as::<CountRow>()
-            .fetch_one(&self.pool)
-            .await?;
+        let row = sqlx::query_as::<_, CountRow>(
+            "SELECT COUNT(*) AS count FROM occurrences WHERE bug_id = $1 AND occurred_at >= $2",
+        )
+        .bind(bug_id.to_string())
+        .bind(since.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await?;
 
         Ok(row.count)
     }
@@ -332,36 +306,30 @@ impl Repository {
             updated_at: record.now,
         };
 
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO tickets (id, bug_id, provider, remote_id, remote_url, priority, recommendation, status, created_at, updated_at) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(ticket.id.to_string());
-            separated.push_bind(ticket.bug_id.to_string());
-            separated.push_bind(ticket.provider.to_string());
-            separated.push_bind(ticket.remote_id.clone());
-            separated.push_bind(ticket.remote_url.clone());
-            separated.push_bind(ticket.priority.to_string());
-            separated.push_bind(ticket.recommendation.clone());
-            separated.push_bind(ticket.status.clone());
-            separated.push_bind(ticket.created_at.to_rfc3339());
-            separated.push_bind(ticket.updated_at.to_rfc3339());
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO tickets (id, bug_id, provider, remote_id, remote_url, priority, recommendation, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+        )
+        .bind(ticket.id.to_string())
+        .bind(ticket.bug_id.to_string())
+        .bind(ticket.provider.to_string())
+        .bind(ticket.remote_id.clone())
+        .bind(ticket.remote_url.clone())
+        .bind(ticket.priority.to_string())
+        .bind(ticket.recommendation.clone())
+        .bind(ticket.status.clone())
+        .bind(ticket.created_at.to_rfc3339())
+        .bind(ticket.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
 
         Ok(ticket)
     }
 
     pub async fn find_ticket_for_bug(&self, bug_id: Uuid) -> AppResult<Option<Ticket>> {
-        let mut query = QueryBuilder::<Any>::new(
-            "SELECT id, bug_id, provider, remote_id, remote_url, priority, recommendation, status, created_at, updated_at FROM tickets WHERE bug_id = ",
-        );
-        query.push_bind(bug_id.to_string());
-
-        query
-            .build_query_as::<TicketRow>()
+        sqlx::query_as::<_, TicketRow>(
+            "SELECT id, bug_id, provider, remote_id, remote_url, priority, recommendation, status, created_at, updated_at FROM tickets WHERE bug_id = $1",
+        )
+            .bind(bug_id.to_string())
             .fetch_optional(&self.pool)
             .await?
             .map(TryInto::try_into)
@@ -374,13 +342,12 @@ impl Repository {
         priority: TicketPriority,
         now: DateTime<Utc>,
     ) -> AppResult<()> {
-        let mut query = QueryBuilder::<Any>::new("UPDATE tickets SET priority = ");
-        query.push_bind(priority.to_string());
-        query.push(", updated_at = ");
-        query.push_bind(now.to_rfc3339());
-        query.push(" WHERE id = ");
-        query.push_bind(ticket_id.to_string());
-        query.build().execute(&self.pool).await?;
+        sqlx::query("UPDATE tickets SET priority = $1, updated_at = $2 WHERE id = $3")
+            .bind(priority.to_string())
+            .bind(now.to_rfc3339())
+            .bind(ticket_id.to_string())
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
@@ -390,18 +357,15 @@ impl Repository {
         comment: &str,
         now: DateTime<Utc>,
     ) -> AppResult<()> {
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO ticket_comments (id, ticket_id, comment, created_at) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(Uuid::new_v4().to_string());
-            separated.push_bind(ticket_id.to_string());
-            separated.push_bind(comment);
-            separated.push_bind(now.to_rfc3339());
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO ticket_comments (id, ticket_id, comment, created_at) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(ticket_id.to_string())
+        .bind(comment)
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -420,19 +384,16 @@ impl Repository {
             sent_at: now,
         };
 
-        let mut query = QueryBuilder::<Any>::new(
-            "INSERT INTO notifications (id, bug_id, provider, message, sent_at) VALUES (",
-        );
-        {
-            let mut separated = query.separated(", ");
-            separated.push_bind(notification.id.to_string());
-            separated.push_bind(notification.bug_id.to_string());
-            separated.push_bind(notification.provider.to_string());
-            separated.push_bind(notification.message.clone());
-            separated.push_bind(notification.sent_at.to_rfc3339());
-            separated.push_unseparated(")");
-        }
-        query.build().execute(&self.pool).await?;
+        sqlx::query(
+            "INSERT INTO notifications (id, bug_id, provider, message, sent_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(notification.id.to_string())
+        .bind(notification.bug_id.to_string())
+        .bind(notification.provider.to_string())
+        .bind(notification.message.clone())
+        .bind(notification.sent_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
 
         Ok(notification)
     }
@@ -448,17 +409,17 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
 struct AccountRow {
     id: String,
     name: String,
-    create_tickets: i64,
+    create_tickets: i32,
     ticket_provider: String,
     ticketing_api_key: Option<String>,
     notification_provider: String,
     notification_api_key: Option<String>,
-    ai_enabled: i64,
-    use_managed_ai: i64,
+    ai_enabled: i32,
+    use_managed_ai: i32,
     ai_api_key: Option<String>,
     notify_min_level: String,
-    rapid_occurrence_window_minutes: i64,
-    rapid_occurrence_threshold: i64,
+    rapid_occurrence_window_minutes: i32,
+    rapid_occurrence_threshold: i32,
 }
 
 impl TryFrom<AccountRow> for Account {
@@ -477,8 +438,8 @@ impl TryFrom<AccountRow> for Account {
             use_managed_ai: row.use_managed_ai != 0,
             ai_api_key: normalize_optional(row.ai_api_key),
             notify_min_level: Severity::from_str(&row.notify_min_level)?,
-            rapid_occurrence_window_minutes: row.rapid_occurrence_window_minutes,
-            rapid_occurrence_threshold: row.rapid_occurrence_threshold,
+            rapid_occurrence_window_minutes: row.rapid_occurrence_window_minutes as i64,
+            rapid_occurrence_threshold: row.rapid_occurrence_threshold as i64,
         })
     }
 }
@@ -518,7 +479,7 @@ struct BugRow {
     latest_stacktrace: String,
     first_seen_at: String,
     last_seen_at: String,
-    occurrence_count: i64,
+    occurrence_count: i32,
 }
 
 impl TryFrom<BugRow> for Bug {
@@ -536,7 +497,7 @@ impl TryFrom<BugRow> for Bug {
             latest_stacktrace: row.latest_stacktrace,
             first_seen_at: DateTime::parse_from_rfc3339(&row.first_seen_at)?.with_timezone(&Utc),
             last_seen_at: DateTime::parse_from_rfc3339(&row.last_seen_at)?.with_timezone(&Utc),
-            occurrence_count: row.occurrence_count,
+            occurrence_count: row.occurrence_count as i64,
         })
     }
 }
