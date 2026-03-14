@@ -60,7 +60,7 @@ Verification policy:
 Environment variables:
 
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
-- `BUGFIXES_DATABASE_URL` default: `sqlite://bugfixes.db`
+- `BUGFIXES_DATABASE_URL` default: `postgres://postgres:postgres@127.0.0.1:5432/bugfixes`
 - `BUGFIXES_FEATURE_FLAGS_PROVIDER` default: `local`
 - `BUGFIXES_POLICY_PROVIDER` default: `local`
 - `BUGFIXES_POLICY2_ENGINE_URL` default: `https://api.policy2.net/run`
@@ -76,13 +76,13 @@ Use `.env.example` as the configuration reference.
 `bugfix.es` now uses `refinery` as its migration system.
 
 - Migrations live in `migrations/`.
-- The application runs embedded `refinery` migrations during startup before the API begins serving traffic.
+- The application and test setup initialize databases through embedded `refinery` migrations.
 - Migration files should be named like `V1__create_accounts.sql`.
 
 Current state:
 
 - `refinery` is now the migration mechanism and startup entrypoint.
-- Migration SQL lives in `migrations/` and runs before repository startup.
+- Migration SQL lives in `migrations/` and runs from the shared repository initialization path for Postgres URLs.
 - Repository bootstrap should not own schema creation going forward.
 
 Suggested CLI workflow:

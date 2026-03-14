@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, str::FromStr};
+use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use sqlx::{Any, AnyPool, FromRow, QueryBuilder, any::AnyPoolOptions};
@@ -11,6 +11,7 @@ use crate::{
         Account, Agent, Bug, CreateAccountRequest, CreateAgentRequest, NotificationProvider,
         NotificationRecord, Severity, Ticket, TicketPriority, TicketProvider,
     },
+    migrations,
 };
 
 #[cfg(test)]
@@ -46,36 +47,12 @@ pub struct CreateTicketRecord<'a> {
 impl Repository {
     pub async fn connect(config: &Config) -> AppResult<Self> {
         sqlx::any::install_default_drivers();
-        ensure_sqlite_database_exists(&config.database_url)?;
+        migrations::run(&config.database_url).await?;
 
-        let max_connections = if config.database_url.contains(":memory:") {
-            1
-        } else {
-            5
-        };
-
-        let sqlite = is_sqlite_url(&config.database_url);
         let pool = AnyPoolOptions::new()
-            .max_connections(max_connections)
-            .after_connect(move |conn, _meta| {
-                Box::pin(async move {
-                    if sqlite {
-                        sqlx::query("PRAGMA foreign_keys = ON")
-                            .execute(&mut *conn)
-                            .await?;
-                    }
-
-                    Ok(())
-                })
-            })
+            .max_connections(5)
             .connect(&config.database_url)
             .await?;
-
-        if sqlite {
-            sqlx::query("PRAGMA journal_mode = WAL")
-                .execute(&pool)
-                .await?;
-        }
 
         Ok(Self { pool })
     }
@@ -459,40 +436,6 @@ impl Repository {
 
         Ok(notification)
     }
-}
-
-fn is_sqlite_url(database_url: &str) -> bool {
-    database_url.starts_with("sqlite:")
-}
-
-fn ensure_sqlite_database_exists(database_url: &str) -> AppResult<()> {
-    if !is_sqlite_url(database_url) {
-        return Ok(());
-    }
-
-    let raw_path = database_url
-        .trim_start_matches("sqlite://")
-        .trim_start_matches("sqlite:")
-        .split('?')
-        .next()
-        .unwrap_or_default();
-
-    if raw_path.is_empty() || raw_path == ":memory:" {
-        return Ok(());
-    }
-
-    let path = PathBuf::from(raw_path);
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
-        fs::create_dir_all(parent)?;
-    }
-    if !path.exists() {
-        fs::File::create(path)?;
-    }
-
-    Ok(())
 }
 
 fn normalize_optional(value: Option<String>) -> Option<String> {
