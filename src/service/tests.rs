@@ -2,11 +2,9 @@ use std::{collections::HashSet, sync::Arc};
 
 use chrono::Utc;
 use serial_test::serial;
-use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::{
     ai::AiRegistry,
-    config::Config,
     domain::{
         CreateAccountRequest, CreateAgentRequest, NotificationProvider, Severity, StacktraceEvent,
         TicketAction, TicketPriority, TicketProvider,
@@ -15,6 +13,7 @@ use crate::{
     notifications::NotificationRegistry,
     policy::build_policy_engine,
     repository::{CreateBugRecord, Repository},
+    test_support::{reset_database, test_config_with_disabled_features},
     ticketing::TicketingRegistry,
 };
 
@@ -24,41 +23,10 @@ async fn test_service() -> IntakeService {
     test_service_with_disabled_features(HashSet::new()).await
 }
 
-fn test_config(disabled_features: HashSet<String>) -> Config {
-    let _ = dotenvy::dotenv();
-    let mut config = Config::from_env().expect("config");
-    config.bind_address = "127.0.0.1:0".to_string();
-    config.feature_flags_provider = "local".to_string();
-    config.policy_provider = "local".to_string();
-    config.policy2_engine_url = "https://api.policy2.net/run".to_string();
-    config.flagsgg_project_id = None;
-    config.flagsgg_agent_id = None;
-    config.flagsgg_environment_id = None;
-    config.disabled_features = disabled_features;
-    config
-}
-
-async fn reset_database(database_url: &str) {
-    let pool: PgPool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(database_url)
-        .await
-        .expect("test database pool");
-
-    sqlx::query(
-        "TRUNCATE TABLE ticket_comments, tickets, notifications, occurrences, bugs, agents, accounts RESTART IDENTITY CASCADE",
-    )
-    .execute(&pool)
-    .await
-    .expect("truncate tables");
-
-    pool.close().await;
-}
-
 async fn test_service_with_disabled_features(disabled_features: HashSet<String>) -> IntakeService {
-    let config = test_config(disabled_features);
+    let config = test_config_with_disabled_features(disabled_features).await;
     let repository = Arc::new(Repository::connect(&config).await.expect("repository"));
-    reset_database(&config.database_url).await;
+    reset_database().await;
     let ticketing = Arc::new(TicketingRegistry::default());
     let notifications = Arc::new(NotificationRegistry::default());
     let ai = Arc::new(AiRegistry::default());

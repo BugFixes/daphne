@@ -101,6 +101,8 @@ Tests live in `tests.rs` files per module. Run with:
 cargo test --all-features
 ```
 
+DB-backed tests provision Postgres through testcontainers. Docker must be available locally and in CI for the full suite to pass.
+
 Test requirements:
 - Add or update tests for every behavior change, bug fix, policy change, migration, or API change
 - Prefer focused tests near the changed module

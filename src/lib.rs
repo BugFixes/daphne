@@ -10,6 +10,9 @@ pub mod repository;
 pub mod service;
 pub mod ticketing;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use axum::{
     Json,
     http::StatusCode,
