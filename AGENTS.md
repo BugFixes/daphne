@@ -3,12 +3,12 @@
 ## Project Summary
 - `bugfix.es` is a Rust service that ingests stacktraces and logs, deduplicates bugs, and drives policy-gated ticketing, notification, and AI workflows.
 - The application uses Axum for HTTP, SQLx for persistence, and Refinery SQL migrations for schema changes.
-- Local development defaults to SQLite; non-local deployments can use Postgres via `BUGFIXES_DATABASE_URL`.
+- The service uses Postgres in all environments via `BUGFIXES_DATABASE_URL`.
 
 ## Repository Layout
 - `src/api/` contains HTTP routes and handlers.
 - `src/service/` contains workflow orchestration, especially `IntakeService`.
-- `src/repository/` contains database access for SQLite and Postgres.
+- `src/repository/` contains database access (Postgres via SQLx).
 - `src/domain/` contains core models and shared types.
 - `src/ticketing/`, `src/notifications/`, and `src/ai/` contain provider registries, traits, and stub implementations.
 - `src/policy/` and `policies/` contain policy execution and policy assets.
@@ -33,7 +33,7 @@
 ## Environment Notes
 - Main runtime config lives in environment variables documented in `README.md` and `.env.example`.
 - Default bind address: `127.0.0.1:3000`
-- Default local database: `sqlite://bugfixes.db`
+- Default local database: `postgres://postgres:postgres@127.0.0.1:5432/bugfixes`
 
 ## Common Expectations
 - Prefer `rg` for search and file discovery.

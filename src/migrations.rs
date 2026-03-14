@@ -1,5 +1,6 @@
-use refinery::embed_migrations;
-use rusqlite::Connection;
+use std::str::FromStr;
+
+use refinery::{config::Config as MigrationConfig, embed_migrations};
 
 use crate::{AppError, AppResult};
 
@@ -9,20 +10,32 @@ mod embedded {
     embed_migrations!("migrations");
 }
 
-pub fn run(database_url: &str) -> AppResult<()> {
-    if !is_sqlite_url(database_url) {
-        tracing::info!(
-            database_url,
-            "skipping refinery migrations for non-sqlite database"
-        );
+pub async fn run(database_url: &str) -> AppResult<()> {
+    if is_postgres_url(database_url) {
+        let mut config = MigrationConfig::from_str(database_url).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to parse postgres migration config: {error}"
+            ))
+        })?;
+
+        let report = embedded::migrations::runner()
+            .run_async(&mut config)
+            .await
+            .map_err(|error| AppError::Internal(format!("failed to run migrations: {error}")))?;
+        log_report(&report);
         return Ok(());
     }
 
-    let mut connection = open_connection(database_url)?;
-    let report = embedded::migrations::runner()
-        .run(&mut connection)
-        .map_err(|error| AppError::Internal(format!("failed to run migrations: {error}")))?;
+    Err(AppError::Validation(format!(
+        "unsupported database url for migrations: {database_url}"
+    )))
+}
 
+fn is_postgres_url(database_url: &str) -> bool {
+    database_url.starts_with("postgres://") || database_url.starts_with("postgresql://")
+}
+
+fn log_report(report: &refinery::Report) {
     if report.applied_migrations().is_empty() {
         tracing::info!("database migrations already up to date");
     } else {
@@ -31,70 +44,19 @@ pub fn run(database_url: &str) -> AppResult<()> {
             "applied database migrations"
         );
     }
-
-    Ok(())
-}
-
-fn is_sqlite_url(database_url: &str) -> bool {
-    database_url.starts_with("sqlite:")
-}
-
-fn open_connection(database_url: &str) -> AppResult<Connection> {
-    match sqlite_target(database_url)? {
-        SqliteTarget::InMemory => {
-            let connection = Connection::open_in_memory().map_err(map_rusqlite_error)?;
-            configure_sqlite_connection(connection)
-        }
-        SqliteTarget::File(path) => {
-            let connection = Connection::open(path).map_err(map_rusqlite_error)?;
-            configure_sqlite_connection(connection)
-        }
-    }
-}
-
-fn sqlite_target(database_url: &str) -> AppResult<SqliteTarget> {
-    if database_url == "sqlite::memory:" {
-        return Ok(SqliteTarget::InMemory);
-    }
-
-    let path = database_url.strip_prefix("sqlite://").ok_or_else(|| {
-        AppError::Validation(format!("unsupported sqlite database url: {database_url}"))
-    })?;
-    let path = path.split('?').next().unwrap_or(path);
-
-    if path.trim().is_empty() {
-        return Err(AppError::Validation(
-            "sqlite database url must include a file path".to_string(),
-        ));
-    }
-
-    Ok(SqliteTarget::File(path.to_string()))
-}
-
-fn map_rusqlite_error(error: rusqlite::Error) -> AppError {
-    AppError::Internal(format!(
-        "failed to open sqlite database for migrations: {error}"
-    ))
-}
-
-fn configure_sqlite_connection(connection: Connection) -> AppResult<Connection> {
-    connection
-        .pragma_update(None, "foreign_keys", "ON")
-        .map_err(map_rusqlite_error)?;
-    Ok(connection)
-}
-
-enum SqliteTarget {
-    InMemory,
-    File(String),
 }
 
 #[cfg(test)]
 mod tests {
-    use super::run;
+    use super::is_postgres_url;
 
     #[test]
-    fn skips_non_sqlite_urls() {
-        run("postgres://bugfixes:secret@localhost:5432/bugfixes").expect("skip postgres");
+    fn recognizes_postgres_urls() {
+        assert!(is_postgres_url(
+            "postgres://bugfixes:secret@localhost:5432/bugfixes"
+        ));
+        assert!(is_postgres_url(
+            "postgresql://bugfixes:secret@localhost:5432/bugfixes"
+        ));
     }
 }

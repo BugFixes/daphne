@@ -17,10 +17,11 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> AppResult<Self> {
+        let _ = dotenvy::dotenv();
         let bind_address =
             env::var("BUGFIXES_BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:3000".to_string());
         let database_url = env::var("BUGFIXES_DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite://bugfixes.db".to_string());
+            .unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5432/bugfixes".to_string());
         let feature_flags_provider =
             env::var("BUGFIXES_FEATURE_FLAGS_PROVIDER").unwrap_or_else(|_| "local".to_string());
         let policy_provider =

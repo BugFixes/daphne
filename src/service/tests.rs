@@ -1,20 +1,19 @@
-use std::{collections::HashSet, env, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 
 use chrono::Utc;
-use uuid::Uuid;
+use serial_test::serial;
 
 use crate::{
     ai::AiRegistry,
-    config::Config,
     domain::{
         CreateAccountRequest, CreateAgentRequest, NotificationProvider, Severity, StacktraceEvent,
         TicketAction, TicketPriority, TicketProvider,
     },
     feature_flags::build_feature_flags,
-    migrations,
     notifications::NotificationRegistry,
     policy::build_policy_engine,
     repository::{CreateBugRecord, Repository},
+    test_support::{reset_database, test_config_with_disabled_features},
     ticketing::TicketingRegistry,
 };
 
@@ -25,20 +24,9 @@ async fn test_service() -> IntakeService {
 }
 
 async fn test_service_with_disabled_features(disabled_features: HashSet<String>) -> IntakeService {
-    let database_path = env::temp_dir().join(format!("bugfixes-service-{}.db", Uuid::new_v4()));
-    let config = Config {
-        bind_address: "127.0.0.1:0".to_string(),
-        database_url: format!("sqlite://{}", database_path.display()),
-        feature_flags_provider: "local".to_string(),
-        policy_provider: "local".to_string(),
-        policy2_engine_url: "https://api.policy2.net/run".to_string(),
-        flagsgg_project_id: None,
-        flagsgg_agent_id: None,
-        flagsgg_environment_id: None,
-        disabled_features,
-    };
-    migrations::run(&config.database_url).expect("migrations");
+    let config = test_config_with_disabled_features(disabled_features).await;
     let repository = Arc::new(Repository::connect(&config).await.expect("repository"));
+    reset_database().await;
     let ticketing = Arc::new(TicketingRegistry::default());
     let notifications = Arc::new(NotificationRegistry::default());
     let ai = Arc::new(AiRegistry::default());
@@ -55,6 +43,7 @@ async fn test_service_with_disabled_features(disabled_features: HashSet<String>)
 }
 
 #[tokio::test]
+#[serial]
 async fn creates_ticket_and_notification_for_new_bug() {
     let service = test_service().await;
     let account = service
@@ -115,6 +104,7 @@ async fn creates_ticket_and_notification_for_new_bug() {
 }
 
 #[tokio::test]
+#[serial]
 async fn escalates_existing_bug_when_it_repeats_rapidly() {
     let service = test_service().await;
     let account = service
@@ -184,6 +174,7 @@ async fn escalates_existing_bug_when_it_repeats_rapidly() {
 }
 
 #[tokio::test]
+#[serial]
 async fn suppresses_debug_notification() {
     let service = test_service().await;
     let account = service
@@ -233,6 +224,7 @@ async fn suppresses_debug_notification() {
 }
 
 #[tokio::test]
+#[serial]
 async fn skips_ticket_creation_when_ticket_provider_flag_is_disabled() {
     let service = test_service_with_disabled_features(HashSet::from([String::from("jira")])).await;
     let account = service
@@ -284,6 +276,7 @@ async fn skips_ticket_creation_when_ticket_provider_flag_is_disabled() {
 }
 
 #[tokio::test]
+#[serial]
 async fn skips_notification_when_notification_provider_flag_is_disabled() {
     let service = test_service_with_disabled_features(HashSet::from([String::from("slack")])).await;
     let account = service
@@ -335,6 +328,7 @@ async fn skips_notification_when_notification_provider_flag_is_disabled() {
 }
 
 #[tokio::test]
+#[serial]
 async fn skips_ai_when_account_uses_customer_managed_ai_without_api_key() {
     let service = test_service().await;
     let account = service
@@ -387,6 +381,7 @@ async fn skips_ai_when_account_uses_customer_managed_ai_without_api_key() {
 }
 
 #[tokio::test]
+#[serial]
 async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
     let service = test_service().await;
     let account = service
