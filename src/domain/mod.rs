@@ -224,6 +224,14 @@ pub struct Agent {
     pub api_secret: String,
 }
 
+/// Stored deduplicated bug record.
+///
+/// The current model intentionally mixes several categories of data:
+/// - canonical identity: `account_id + stacktrace_hash`
+/// - canonicalized identity materialization: `normalized_stacktrace`
+/// - first-occurrence snapshots: `agent_id`, `language`, `first_seen_at`
+/// - latest or aggregate occurrence state: `severity`, `latest_stacktrace`, `last_seen_at`,
+///   `occurrence_count`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bug {
     pub id: Uuid,
@@ -326,6 +334,13 @@ impl CreateAgentRequest {
 }
 
 /// Canonical stacktrace-first event used by the intake service.
+///
+/// Field roles:
+/// - transport and authentication: `agent_key`, `agent_secret`
+/// - bug identity primitive: `stacktrace`
+/// - occurrence metadata: `level`, `occurred_at`, `service`, `environment`, `attributes`
+///
+/// The deduplicated bug key is `account_id + sha256(normalize(stacktrace))`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StacktraceEvent {
     pub agent_key: String,
@@ -462,6 +477,10 @@ pub struct NotificationOutcome {
     pub message: Option<String>,
 }
 
+/// Summary returned after ingesting an event into the bug and occurrence model.
+///
+/// `stacktrace_hash` is derived from the normalized event stacktrace, and
+/// `occurrence_count` reflects the aggregate bug state after the event is stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntakeOutcome {
     pub bug_id: Uuid,

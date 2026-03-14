@@ -446,6 +446,8 @@ impl IntakeService {
     }
 }
 
+/// Canonicalize a raw stacktrace before hashing by trimming lines, dropping empties,
+/// and masking unstable memory addresses.
 fn normalize_stacktrace(input: &str) -> String {
     let address_pattern = Regex::new(r"0x[0-9a-fA-F]+").expect("valid address regex");
     input
@@ -457,6 +459,7 @@ fn normalize_stacktrace(input: &str) -> String {
         .join("\n")
 }
 
+/// Hash the canonicalized stacktrace used in the `(account_id, stacktrace_hash)` bug key.
 fn hash_stacktrace(normalized_stacktrace: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(normalized_stacktrace.as_bytes());

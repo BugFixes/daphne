@@ -455,3 +455,98 @@ async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
     assert!(response.ticket.is_some());
     assert_eq!(response.occurrence_count, 2);
 }
+
+#[tokio::test]
+#[serial]
+async fn deduplicates_by_normalized_stacktrace_and_updates_derived_bug_fields() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Theta".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::Github,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Fatal,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let first_occurred_at = Utc::now();
+    let second_occurred_at = first_occurred_at + chrono::Duration::minutes(5);
+    let first_stacktrace = "panic: nil pointer 0xabc\n  frame_one";
+    let second_stacktrace = " panic: nil pointer 0xdef \n\n frame_one ";
+
+    let first = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "rust".to_string(),
+            stacktrace: first_stacktrace.to_string(),
+            level: Severity::Warn,
+            occurred_at: Some(first_occurred_at),
+            service: Some("api".to_string()),
+            environment: Some("prod".to_string()),
+            attributes: std::collections::HashMap::from([(
+                "release".to_string(),
+                "1.0.0".to_string(),
+            )]),
+        })
+        .await
+        .expect("first ingest");
+    let second = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "go".to_string(),
+            stacktrace: second_stacktrace.to_string(),
+            level: Severity::Fatal,
+            occurred_at: Some(second_occurred_at),
+            service: Some("worker".to_string()),
+            environment: Some("staging".to_string()),
+            attributes: std::collections::HashMap::from([(
+                "release".to_string(),
+                "1.0.1".to_string(),
+            )]),
+        })
+        .await
+        .expect("second ingest");
+
+    assert!(first.is_new_bug);
+    assert!(!second.is_new_bug);
+    assert_eq!(first.stacktrace_hash, second.stacktrace_hash);
+    assert_eq!(second.occurrence_count, 2);
+
+    let bug = service
+        .repository
+        .find_bug_by_hash(account.id, &first.stacktrace_hash)
+        .await
+        .expect("bug lookup")
+        .expect("bug");
+
+    assert_eq!(bug.language, "rust");
+    assert_eq!(bug.agent_id, agent.id);
+    assert_eq!(bug.severity, Severity::Fatal);
+    assert_eq!(
+        bug.normalized_stacktrace,
+        super::normalize_stacktrace(first_stacktrace)
+    );
+    assert_eq!(bug.latest_stacktrace, second_stacktrace);
+    assert_eq!(bug.first_seen_at, first_occurred_at);
+    assert_eq!(bug.last_seen_at, second_occurred_at);
+    assert_eq!(bug.occurrence_count, 2);
+}
