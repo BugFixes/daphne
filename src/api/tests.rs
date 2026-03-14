@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::domain::{GoBugPayload, GoLogPayload, Severity};
+use crate::domain::{GoBugPayload, GoLogPayload, Severity, StacktraceEventPayload};
 
 use super::{AgentAuth, decode_go_bytes, format_location, map_go_bug_payload, map_go_log_payload};
 
@@ -123,4 +123,33 @@ fn accepts_rust_bug_payload_shape() {
     assert_eq!(event.level, Severity::Fatal);
     assert!(event.stacktrace.contains("worker crashed"));
     assert!(event.stacktrace.contains("/workspace/src/worker.rs:42:7"));
+}
+
+#[test]
+fn preserves_canonical_stacktrace_payload_fields() {
+    let payload = StacktraceEventPayload {
+        agent_key: "key".to_string(),
+        agent_secret: Some("secret".to_string()),
+        language: "go".to_string(),
+        stacktrace: "panic: test".to_string(),
+        level: Severity::Error,
+        occurred_at: None,
+        service: Some("api".to_string()),
+        environment: Some("prod".to_string()),
+        attributes: std::collections::HashMap::from([(
+            "source".to_string(),
+            "stacktrace_api".to_string(),
+        )]),
+    };
+
+    let event = payload.into_stacktrace_event();
+
+    assert_eq!(event.agent_key, "key");
+    assert_eq!(event.agent_secret.as_deref(), Some("secret"));
+    assert_eq!(event.service.as_deref(), Some("api"));
+    assert_eq!(event.environment.as_deref(), Some("prod"));
+    assert_eq!(
+        event.attributes.get("source").map(String::as_str),
+        Some("stacktrace_api")
+    );
 }

@@ -7,8 +7,8 @@ use crate::{
     ai::AiRegistry,
     config::Config,
     domain::{
-        CreateAccountRequest, CreateAgentRequest, NotificationProvider, Severity,
-        StacktraceEventRequest, TicketAction, TicketPriority, TicketProvider,
+        CreateAccountRequest, CreateAgentRequest, NotificationProvider, Severity, StacktraceEvent,
+        TicketAction, TicketPriority, TicketProvider,
     },
     feature_flags::build_feature_flags,
     migrations,
@@ -85,7 +85,7 @@ async fn creates_ticket_and_notification_for_new_bug() {
         .expect("agent");
 
     let response = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "rust".to_string(),
@@ -146,7 +146,7 @@ async fn escalates_existing_bug_when_it_repeats_rapidly() {
     let now = Utc::now();
 
     service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key.clone(),
             agent_secret: Some(agent.api_secret.clone()),
             language: "go".to_string(),
@@ -160,7 +160,7 @@ async fn escalates_existing_bug_when_it_repeats_rapidly() {
         .await
         .expect("first ingest");
     let second = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "go".to_string(),
@@ -214,7 +214,7 @@ async fn suppresses_debug_notification() {
         .expect("agent");
 
     let response = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "javascript".to_string(),
@@ -263,7 +263,7 @@ async fn skips_ticket_creation_when_ticket_provider_flag_is_disabled() {
         .expect("agent");
 
     let response = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "rust".to_string(),
@@ -314,7 +314,7 @@ async fn skips_notification_when_notification_provider_flag_is_disabled() {
         .expect("agent");
 
     let response = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "rust".to_string(),
@@ -365,7 +365,7 @@ async fn skips_ai_when_account_uses_customer_managed_ai_without_api_key() {
         .expect("agent");
 
     let response = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "rust".to_string(),
@@ -441,7 +441,7 @@ async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
         .expect("occurrence");
 
     let response = service
-        .ingest(StacktraceEventRequest {
+        .ingest(StacktraceEvent {
             agent_key: agent.api_key,
             agent_secret: Some(agent.api_secret),
             language: "rust".to_string(),

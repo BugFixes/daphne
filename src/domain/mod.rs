@@ -325,8 +325,9 @@ impl CreateAgentRequest {
     }
 }
 
+/// Canonical stacktrace-first event used by the intake service.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct StacktraceEventRequest {
+pub struct StacktraceEvent {
     pub agent_key: String,
     pub agent_secret: Option<String>,
     pub language: String,
@@ -340,7 +341,7 @@ pub struct StacktraceEventRequest {
     pub attributes: HashMap<String, String>,
 }
 
-impl StacktraceEventRequest {
+impl StacktraceEvent {
     pub fn validate(&self) -> AppResult<()> {
         if self.agent_key.trim().is_empty() {
             return Err(AppError::Validation(
@@ -359,6 +360,39 @@ impl StacktraceEventRequest {
     }
 }
 
+/// Raw API payload for the generic stacktrace intake endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct StacktraceEventPayload {
+    pub agent_key: String,
+    pub agent_secret: Option<String>,
+    pub language: String,
+    pub stacktrace: String,
+    #[serde(default)]
+    pub level: Severity,
+    pub occurred_at: Option<DateTime<Utc>>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub attributes: HashMap<String, String>,
+}
+
+impl StacktraceEventPayload {
+    pub fn into_stacktrace_event(self) -> StacktraceEvent {
+        StacktraceEvent {
+            agent_key: self.agent_key,
+            agent_secret: self.agent_secret,
+            language: self.language,
+            stacktrace: self.stacktrace,
+            level: self.level,
+            occurred_at: self.occurred_at,
+            service: self.service,
+            environment: self.environment,
+            attributes: self.attributes,
+        }
+    }
+}
+
+/// Raw log payload emitted by `go-bugfixes/logs` and compatible agents.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GoLogPayload {
     pub log: String,
@@ -370,6 +404,7 @@ pub struct GoLogPayload {
     pub stack: Option<String>,
 }
 
+/// Raw panic payload emitted by `go-bugfixes/middleware` and compatible agents.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GoBugPayload {
     pub bug: Value,
@@ -379,6 +414,22 @@ pub struct GoBugPayload {
     pub line: Option<String>,
     pub line_number: Option<i64>,
     pub level: String,
+}
+
+impl From<StacktraceEvent> for StacktraceEventPayload {
+    fn from(value: StacktraceEvent) -> Self {
+        Self {
+            agent_key: value.agent_key,
+            agent_secret: value.agent_secret,
+            language: value.language,
+            stacktrace: value.stacktrace,
+            level: value.level,
+            occurred_at: value.occurred_at,
+            service: value.service,
+            environment: value.environment,
+            attributes: value.attributes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

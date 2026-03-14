@@ -14,7 +14,7 @@ use crate::{
     AppError, AppResult,
     domain::{
         CreateAccountRequest, CreateAgentRequest, GoBugPayload, GoLogPayload, Severity,
-        StacktraceEventRequest,
+        StacktraceEvent, StacktraceEventPayload,
     },
     repository::Repository,
     service::IntakeService,
@@ -64,9 +64,12 @@ async fn create_agent(
 
 async fn ingest_stacktrace(
     State(state): State<AppState>,
-    Json(request): Json<StacktraceEventRequest>,
+    Json(payload): Json<StacktraceEventPayload>,
 ) -> AppResult<Json<crate::domain::IntakeOutcome>> {
-    let outcome = state.intake_service.ingest(request).await?;
+    let outcome = state
+        .intake_service
+        .ingest(payload.into_stacktrace_event())
+        .await?;
     Ok(Json(outcome))
 }
 
@@ -76,8 +79,8 @@ async fn ingest_go_log(
     Json(payload): Json<GoLogPayload>,
 ) -> AppResult<Json<crate::domain::IntakeOutcome>> {
     let auth = extract_agent_auth(&headers)?;
-    let request = map_go_log_payload(auth, payload)?;
-    let outcome = state.intake_service.ingest(request).await?;
+    let event = map_go_log_payload(auth, payload)?;
+    let outcome = state.intake_service.ingest(event).await?;
     Ok(Json(outcome))
 }
 
@@ -87,12 +90,12 @@ async fn ingest_go_bug(
     Json(payload): Json<GoBugPayload>,
 ) -> AppResult<Json<crate::domain::IntakeOutcome>> {
     let auth = extract_agent_auth(&headers)?;
-    let request = map_go_bug_payload(auth, payload)?;
-    let outcome = state.intake_service.ingest(request).await?;
+    let event = map_go_bug_payload(auth, payload)?;
+    let outcome = state.intake_service.ingest(event).await?;
     Ok(Json(outcome))
 }
 
-fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<StacktraceEventRequest> {
+fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<StacktraceEvent> {
     let level = parse_level(&payload.level)?;
     let mut parts = Vec::new();
 
@@ -109,7 +112,7 @@ fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<Stack
         parts.push(stack);
     }
 
-    Ok(StacktraceEventRequest {
+    Ok(StacktraceEvent {
         agent_key: auth.key,
         agent_secret: Some(auth.secret),
         language: "go".to_string(),
@@ -122,7 +125,7 @@ fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<Stack
     })
 }
 
-fn map_go_bug_payload(auth: AgentAuth, payload: GoBugPayload) -> AppResult<StacktraceEventRequest> {
+fn map_go_bug_payload(auth: AgentAuth, payload: GoBugPayload) -> AppResult<StacktraceEvent> {
     let level = parse_level(&payload.level)?;
     let mut parts = Vec::new();
 
@@ -139,7 +142,7 @@ fn map_go_bug_payload(auth: AgentAuth, payload: GoBugPayload) -> AppResult<Stack
         parts.push(raw);
     }
 
-    Ok(StacktraceEventRequest {
+    Ok(StacktraceEvent {
         agent_key: auth.key,
         agent_secret: Some(auth.secret),
         language: "go".to_string(),

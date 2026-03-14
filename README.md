@@ -15,9 +15,9 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 
 - `POST /v1/accounts` creates an account with ticketing and notification policy.
 - `POST /v1/agents` creates an agent and returns its `api_key` and `api_secret`.
-- `POST /v1/log` accepts the native `go-bugfixes/logs` and `bugfixes-rs` log payload shape.
-- `POST /v1/bug` accepts the native `go-bugfixes/middleware` and `bugfixes-rs` panic payload shape.
-- `POST /v1/events/stacktraces` remains available as a generic non-Go intake path.
+- `POST /v1/log` accepts raw `go-bugfixes/logs` and `bugfixes-rs` log payloads, then maps them into canonical stacktrace events.
+- `POST /v1/bug` accepts raw `go-bugfixes/middleware` and `bugfixes-rs` panic payloads, then maps them into canonical stacktrace events.
+- `POST /v1/events/stacktraces` accepts the canonical stacktrace event payload directly.
 - `GET /healthz` returns a basic health response.
 
 The current providers are local stubs for:
@@ -170,6 +170,12 @@ curl -X POST http://127.0.0.1:3000/v1/bug \
 ```
 
 `../bugfixes-rs` currently targets the same `POST /log` and `POST /bug` contract with the same `X-API-KEY` and `X-API-SECRET` headers, so the Rust agent can use this service without a separate intake path.
+
+The intake model is stacktrace-first:
+
+- raw agent and API payloads describe what was observed at the edge
+- canonical stacktrace events are the service input used for hashing, deduplication, and workflow decisions
+- bugs, occurrences, tickets, and notifications are derived from those canonical stacktrace events
 
 ## Data model
 
