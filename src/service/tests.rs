@@ -550,3 +550,218 @@ async fn deduplicates_by_normalized_stacktrace_and_updates_derived_bug_fields() 
     assert_eq!(bug.last_seen_at, second_occurred_at);
     assert_eq!(bug.occurrence_count, 2);
 }
+
+#[tokio::test]
+#[serial]
+async fn comments_on_repeat_bug_before_reaching_escalation_threshold() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Iota".to_string(),
+            create_tickets: true,
+            ticket_provider: TicketProvider::Jira,
+            ticketing_api_key: Some("jira_test_key".to_string()),
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Warn,
+            rapid_occurrence_window_minutes: 60,
+            rapid_occurrence_threshold: 3,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let first_occurred_at = Utc::now();
+
+    let first = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "go".to_string(),
+            stacktrace: "panic: temporary backend timeout".to_string(),
+            level: Severity::Warn,
+            occurred_at: Some(first_occurred_at),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("first ingest");
+    let second = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "go".to_string(),
+            stacktrace: "panic: temporary backend timeout".to_string(),
+            level: Severity::Warn,
+            occurred_at: Some(first_occurred_at + chrono::Duration::minutes(10)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("second ingest");
+
+    assert!(first.is_new_bug);
+    assert_eq!(first.ticket_action, TicketAction::Created);
+    assert!(!second.is_new_bug);
+    assert_eq!(second.ticket_action, TicketAction::Commented);
+    assert_eq!(second.occurrence_count, 2);
+    assert!(!second.notification.sent);
+    assert_eq!(
+        second.ticket.expect("ticket").priority,
+        TicketPriority::Medium
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn comments_on_repeat_bug_when_ticket_priority_is_already_critical() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Kappa".to_string(),
+            create_tickets: true,
+            ticket_provider: TicketProvider::Linear,
+            ticketing_api_key: Some("linear_test_key".to_string()),
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Warn,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let first_occurred_at = Utc::now();
+
+    let first = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "rust".to_string(),
+            stacktrace: "panic: unrecoverable allocator corruption".to_string(),
+            level: Severity::Fatal,
+            occurred_at: Some(first_occurred_at),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("first ingest");
+    let second = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            stacktrace: "panic: unrecoverable allocator corruption".to_string(),
+            level: Severity::Fatal,
+            occurred_at: Some(first_occurred_at + chrono::Duration::minutes(5)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("second ingest");
+
+    assert_eq!(
+        first.ticket.expect("ticket").priority,
+        TicketPriority::Critical
+    );
+    assert_eq!(second.ticket_action, TicketAction::Commented);
+    assert!(!second.notification.sent);
+    assert_eq!(
+        second.ticket.expect("ticket").priority,
+        TicketPriority::Critical
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn does_not_deduplicate_meaningfully_different_stacktraces() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Lambda".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::Github,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Fatal,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let first_occurred_at = Utc::now();
+    let second_occurred_at = first_occurred_at + chrono::Duration::minutes(5);
+    let first_stacktrace = "panic: nil pointer 0xabc\n  frame_one";
+    let second_stacktrace = "panic: nil pointer 0xdef\n  frame_two";
+
+    let first = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "rust".to_string(),
+            stacktrace: first_stacktrace.to_string(),
+            level: Severity::Error,
+            occurred_at: Some(first_occurred_at),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("first ingest");
+    let second = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            stacktrace: second_stacktrace.to_string(),
+            level: Severity::Error,
+            occurred_at: Some(second_occurred_at),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("second ingest");
+
+    assert!(first.is_new_bug);
+    assert!(second.is_new_bug);
+    assert_ne!(first.stacktrace_hash, second.stacktrace_hash);
+}
