@@ -1,5 +1,6 @@
-use refinery::embed_migrations;
-use tokio_postgres::NoTls;
+use std::str::FromStr;
+
+use refinery::{config::Config as MigrationConfig, embed_migrations};
 
 use crate::{AppError, AppResult};
 
@@ -11,23 +12,14 @@ mod embedded {
 
 pub async fn run(database_url: &str) -> AppResult<()> {
     if is_postgres_url(database_url) {
-        let (mut client, connection) =
-            tokio_postgres::connect(database_url, NoTls)
-                .await
-                .map_err(|error| {
-                    AppError::Internal(format!(
-                        "failed to connect to postgres for migrations: {error}"
-                    ))
-                })?;
-
-        tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::error!(%error, "postgres migration connection error");
-            }
-        });
+        let mut config = MigrationConfig::from_str(database_url).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to parse postgres migration config: {error}"
+            ))
+        })?;
 
         let report = embedded::migrations::runner()
-            .run_async(&mut client)
+            .run_async(&mut config)
             .await
             .map_err(|error| AppError::Internal(format!("failed to run migrations: {error}")))?;
         log_report(&report);
