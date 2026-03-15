@@ -1,4 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, LazyLock},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use regex::Regex;
@@ -39,6 +42,18 @@ pub struct IntakeService {
     notification_cooldown_minutes: i64,
     log_retention_days: i64,
 }
+
+static ADDRESS_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b0x[0-9a-fA-F]+\b").expect("valid address regex"));
+static GO_GOROUTINE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\bgoroutine \d+\b").expect("valid goroutine regex"));
+static GO_PC_OFFSET_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\+0x[0-9a-fA-F]+\b").expect("valid go pc offset regex"));
+static RUST_SYMBOL_HASH_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"::h[0-9a-fA-F]{16}\b").expect("valid rust symbol hash regex"));
+static RUSTC_SOURCE_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(/rustc/)[0-9a-fA-F]{40}(/)").expect("valid rustc source path regex")
+});
 
 #[derive(Debug, Clone, Copy)]
 pub struct IntakeServiceSettings {
@@ -81,7 +96,7 @@ impl IntakeService {
         };
         let account = self.repository.find_account(agent.account_id).await?;
         let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
-        let normalized_stacktrace = normalize_stacktrace(&event.stacktrace);
+        let normalized_stacktrace = normalize_stacktrace(&event.language, &event.stacktrace);
         let stacktrace_hash = hash_stacktrace(&normalized_stacktrace);
 
         if let Some(existing_bug) = self
@@ -565,22 +580,36 @@ impl IntakeService {
 }
 
 /// Canonicalize a raw stacktrace before hashing by trimming lines, dropping empties,
-/// and masking unstable memory addresses.
-fn normalize_stacktrace(input: &str) -> String {
-    let address_pattern = Regex::new(r"0x[0-9a-fA-F]+").expect("valid address regex");
-    let goroutine_pattern = Regex::new(r"\bgoroutine \d+\b").expect("valid goroutine regex");
+/// and masking unstable runtime or build noise for supported trace formats.
+fn normalize_stacktrace(language: &str, input: &str) -> String {
+    let language = language.trim().to_ascii_lowercase();
     input
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(|line| {
-            let line = address_pattern.replace_all(line, "0xADDR");
-            goroutine_pattern
-                .replace_all(line.as_ref(), "goroutine N")
-                .into_owned()
-        })
+        .map(|line| normalize_stacktrace_line(&language, line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn normalize_stacktrace_line(language: &str, line: &str) -> String {
+    match language {
+        "go" | "golang" => {
+            let line = GO_GOROUTINE_PATTERN.replace_all(line, "goroutine N");
+            let line = GO_PC_OFFSET_PATTERN.replace_all(line.as_ref(), "+0xOFFSET");
+            ADDRESS_PATTERN
+                .replace_all(line.as_ref(), "0xADDR")
+                .into_owned()
+        }
+        "rust" | "rs" => {
+            let line = RUST_SYMBOL_HASH_PATTERN.replace_all(line, "::hHASH");
+            let line = RUSTC_SOURCE_PATH_PATTERN.replace_all(line.as_ref(), "${1}RUSTC${2}");
+            ADDRESS_PATTERN
+                .replace_all(line.as_ref(), "0xADDR")
+                .into_owned()
+        }
+        _ => ADDRESS_PATTERN.replace_all(line, "0xADDR").into_owned(),
+    }
 }
 
 /// Hash the canonicalized stacktrace used in the `(account_id, stacktrace_hash)` bug key.

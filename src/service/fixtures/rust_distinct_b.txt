@@ -1,0 +1,7 @@
+thread 'tokio-runtime-worker' panicked at src/scheduler.rs:42:7:
+called `Option::unwrap()` on a `None` value
+stack backtrace:
+0: 0x7ffeeabc9999 - my_app::scheduler::tick::h3333333333333333
+             at /Users/build/project/src/scheduler.rs:42:7
+1: 0x7ffeeabc5678 - std::sys::backtrace::__rust_begin_short_backtrace::h2222222222222222
+             at /rustc/cccccccccccccccccccccccccccccccccccccccc/library/std/src/sys/backtrace.rs:158:18

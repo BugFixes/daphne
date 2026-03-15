@@ -1,0 +1,7 @@
+thread 'tokio-runtime-worker' panicked at src/worker.rs:42:7:
+called `Option::unwrap()` on a `None` value
+stack backtrace:
+0: 0x7ffeeddd9999 - my_app::worker::run::h9999999999999999
+             at /Users/build/project/src/worker.rs:42:7
+1: 0x7ffeeddd8888 - std::sys::backtrace::__rust_begin_short_backtrace::habcdefabcdefabcd
+             at /rustc/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/library/std/src/sys/backtrace.rs:158:18
