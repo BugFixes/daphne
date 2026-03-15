@@ -21,7 +21,7 @@ use crate::{
         SendNotificationProviderPolicyInput, SendNotificationTicketPolicyInput,
         UseAiAccountPolicyInput, UseAiAdvisorPolicyInput, UseAiPolicyInput,
     },
-    repository::{CreateBugRecord, CreateTicketRecord, Repository},
+    repository::{CreateBugRecord, CreateTicketRecord, RecordOccurrence, Repository},
     ticketing::{
         TicketCommentRequest, TicketCreateRequest, TicketPriorityRequest, TicketingRegistry,
         build_escalation_comment, build_repeat_comment,
@@ -123,7 +123,15 @@ impl IntakeService {
             })
             .await?;
         self.repository
-            .record_occurrence(bug.id, event.level, &event.stacktrace, occurred_at)
+            .record_occurrence(RecordOccurrence {
+                bug_id: bug.id,
+                severity: event.level,
+                stacktrace: &event.stacktrace,
+                occurred_at,
+                service: event.service.as_deref(),
+                environment: event.environment.as_deref(),
+                attributes: &event.attributes,
+            })
             .await?;
 
         let (ticket_action, ticket, ai_recommendation) = if self
@@ -188,7 +196,15 @@ impl IntakeService {
         occurred_at: DateTime<Utc>,
     ) -> AppResult<crate::domain::IntakeOutcome> {
         self.repository
-            .record_occurrence(existing_bug.id, event.level, &event.stacktrace, occurred_at)
+            .record_occurrence(RecordOccurrence {
+                bug_id: existing_bug.id,
+                severity: event.level,
+                stacktrace: &event.stacktrace,
+                occurred_at,
+                service: event.service.as_deref(),
+                environment: event.environment.as_deref(),
+                attributes: &event.attributes,
+            })
             .await?;
         let bug = self
             .repository
@@ -266,9 +282,6 @@ impl IntakeService {
                         priority: next_priority,
                     })
                     .await?;
-                self.repository
-                    .update_ticket_priority(existing_ticket.id, next_priority, occurred_at)
-                    .await?;
                 let comment =
                     build_escalation_comment(recent_count, account.rapid_occurrence_window_minutes);
                 provider
@@ -281,9 +294,11 @@ impl IntakeService {
                         comment: comment.clone(),
                     })
                     .await?;
-                self.repository
-                    .add_ticket_comment(existing_ticket.id, &comment, occurred_at)
-                    .await?;
+                ticket = Some(
+                    self.repository
+                        .escalate_ticket(&existing_ticket, next_priority, &comment, occurred_at)
+                        .await?,
+                );
                 ticket_action = TicketAction::Escalated;
             } else {
                 let comment = build_repeat_comment(occurred_at);
@@ -294,13 +309,13 @@ impl IntakeService {
                         comment: comment.clone(),
                     })
                     .await?;
-                self.repository
-                    .add_ticket_comment(existing_ticket.id, &comment, occurred_at)
-                    .await?;
+                ticket = Some(
+                    self.repository
+                        .comment_on_ticket(&existing_ticket, &comment, occurred_at)
+                        .await?,
+                );
                 ticket_action = TicketAction::Commented;
             }
-
-            ticket = self.repository.find_ticket_for_bug(bug.id).await?;
         }
 
         let notification = self
@@ -419,6 +434,16 @@ impl IntakeService {
             })
             .await?
         {
+            self.repository
+                .record_notification_skip(
+                    bug.id,
+                    account.notification_provider,
+                    level,
+                    ticket_action,
+                    "policy_denied",
+                    occurred_at,
+                )
+                .await?;
             return Ok(NotificationOutcome {
                 sent: false,
                 provider: None,
@@ -435,7 +460,14 @@ impl IntakeService {
             })
             .await?;
         self.repository
-            .record_notification(bug.id, account.notification_provider, &message, occurred_at)
+            .record_notification(
+                bug.id,
+                account.notification_provider,
+                &message,
+                level,
+                ticket_action,
+                occurred_at,
+            )
             .await?;
 
         Ok(NotificationOutcome {
@@ -450,11 +482,17 @@ impl IntakeService {
 /// and masking unstable memory addresses.
 fn normalize_stacktrace(input: &str) -> String {
     let address_pattern = Regex::new(r"0x[0-9a-fA-F]+").expect("valid address regex");
+    let goroutine_pattern = Regex::new(r"\bgoroutine \d+\b").expect("valid goroutine regex");
     input
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .map(|line| address_pattern.replace_all(line, "0xADDR").into_owned())
+        .map(|line| {
+            let line = address_pattern.replace_all(line, "0xADDR");
+            goroutine_pattern
+                .replace_all(line.as_ref(), "goroutine N")
+                .into_owned()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }

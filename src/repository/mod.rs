@@ -1,15 +1,18 @@
-use std::str::FromStr;
+use std::{collections::HashMap, str::FromStr};
 
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, PgPool, postgres::PgPoolOptions};
+use serde_json::json;
+use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
     config::Config,
     domain::{
-        Account, Agent, Bug, CreateAccountRequest, CreateAgentRequest, NotificationProvider,
-        NotificationRecord, Severity, Ticket, TicketPriority, TicketProvider,
+        Account, AccountProviderConfig, AccountProviderKind, Agent, Bug, CreateAccountRequest,
+        CreateAgentRequest, NotificationEvent, NotificationEventStatus, NotificationProvider,
+        NotificationRecord, Occurrence, Severity, Ticket, TicketAction, TicketEvent,
+        TicketPriority, TicketProvider,
     },
     migrations,
 };
@@ -44,6 +47,16 @@ pub struct CreateTicketRecord<'a> {
     pub now: DateTime<Utc>,
 }
 
+pub struct RecordOccurrence<'a> {
+    pub bug_id: Uuid,
+    pub severity: Severity,
+    pub stacktrace: &'a str,
+    pub occurred_at: DateTime<Utc>,
+    pub service: Option<&'a str>,
+    pub environment: Option<&'a str>,
+    pub attributes: &'a HashMap<String, String>,
+}
+
 impl Repository {
     pub async fn connect(config: &Config) -> AppResult<Self> {
         sqlx::any::install_default_drivers();
@@ -74,6 +87,9 @@ impl Repository {
             rapid_occurrence_window_minutes: request.rapid_occurrence_window_minutes,
             rapid_occurrence_threshold: request.rapid_occurrence_threshold,
         };
+        let now = Utc::now();
+        let provider_configs = build_provider_configs(&account, now);
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             "INSERT INTO accounts (id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
@@ -91,9 +107,14 @@ impl Repository {
         .bind(account.notify_min_level.to_string())
         .bind(account.rapid_occurrence_window_minutes as i32)
         .bind(account.rapid_occurrence_threshold as i32)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        for config in &provider_configs {
+            insert_account_provider_config_tx(&mut tx, config).await?;
+        }
+
+        tx.commit().await?;
         Ok(account)
     }
 
@@ -127,12 +148,27 @@ impl Repository {
         let row = sqlx::query_as::<_, AccountRow>(
             "SELECT id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = $1",
         )
-            .bind(account_id.to_string())
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound(format!("account {account_id}")))?;
+        .bind(account_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("account {account_id}")))?;
 
         row.try_into()
+    }
+
+    pub async fn list_account_provider_configs(
+        &self,
+        account_id: Uuid,
+    ) -> AppResult<Vec<AccountProviderConfig>> {
+        sqlx::query_as::<_, AccountProviderConfigRow>(
+            "SELECT id, account_id, kind, provider, api_key, settings_json, created_at, updated_at FROM account_provider_configs WHERE account_id = $1 ORDER BY kind",
+        )
+        .bind(account_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
     }
 
     pub async fn find_agent_by_key(&self, api_key: &str) -> AppResult<Agent> {
@@ -155,11 +191,11 @@ impl Repository {
         let row = sqlx::query_as::<_, AgentRow>(
             "SELECT id, account_id, name, api_key, api_secret FROM agents WHERE api_key = $1 AND api_secret = $2",
         )
-            .bind(api_key)
-            .bind(api_secret)
-            .fetch_optional(&self.pool)
-            .await?
-            .ok_or_else(|| AppError::NotFound("agent for provided credentials".to_string()))?;
+        .bind(api_key)
+        .bind(api_secret)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("agent for provided credentials".to_string()))?;
 
         row.try_into()
     }
@@ -172,12 +208,12 @@ impl Repository {
         sqlx::query_as::<_, BugRow>(
             "SELECT id, account_id, agent_id, language, severity, stacktrace_hash, normalized_stacktrace, latest_stacktrace, first_seen_at, last_seen_at, occurrence_count FROM bugs WHERE account_id = $1 AND stacktrace_hash = $2",
         )
-            .bind(account_id.to_string())
-            .bind(stacktrace_hash)
-            .fetch_optional(&self.pool)
-            .await?
-            .map(TryInto::try_into)
-            .transpose()
+        .bind(account_id.to_string())
+        .bind(stacktrace_hash)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
     }
 
     pub async fn create_bug(&self, record: CreateBugRecord<'_>) -> AppResult<Bug> {
@@ -215,25 +251,45 @@ impl Repository {
         Ok(bug)
     }
 
-    pub async fn record_occurrence(
-        &self,
-        bug_id: Uuid,
-        severity: Severity,
-        stacktrace: &str,
-        occurred_at: DateTime<Utc>,
-    ) -> AppResult<()> {
+    pub async fn record_occurrence(&self, record: RecordOccurrence<'_>) -> AppResult<Occurrence> {
+        let occurrence = Occurrence {
+            id: Uuid::new_v4(),
+            bug_id: record.bug_id,
+            severity: record.severity,
+            stacktrace: record.stacktrace.to_string(),
+            occurred_at: record.occurred_at,
+            service: record.service.map(str::to_string),
+            environment: record.environment.map(str::to_string),
+            attributes: record.attributes.clone(),
+        };
+
         sqlx::query(
-            "INSERT INTO occurrences (id, bug_id, severity, stacktrace, occurred_at) VALUES ($1, $2, $3, $4, $5)",
+            "INSERT INTO occurrences (id, bug_id, severity, stacktrace, occurred_at, service, environment, attributes_json) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(bug_id.to_string())
-        .bind(severity.to_string())
-        .bind(stacktrace)
-        .bind(occurred_at.to_rfc3339())
+        .bind(occurrence.id.to_string())
+        .bind(occurrence.bug_id.to_string())
+        .bind(occurrence.severity.to_string())
+        .bind(occurrence.stacktrace.clone())
+        .bind(occurrence.occurred_at.to_rfc3339())
+        .bind(occurrence.service.clone())
+        .bind(occurrence.environment.clone())
+        .bind(serde_json::to_string(&occurrence.attributes)?)
         .execute(&self.pool)
         .await?;
 
-        Ok(())
+        Ok(occurrence)
+    }
+
+    pub async fn list_occurrences_for_bug(&self, bug_id: Uuid) -> AppResult<Vec<Occurrence>> {
+        sqlx::query_as::<_, OccurrenceRow>(
+            "SELECT id, bug_id, severity, stacktrace, occurred_at, service, environment, attributes_json FROM occurrences WHERE bug_id = $1 ORDER BY occurred_at ASC",
+        )
+        .bind(bug_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
     }
 
     pub async fn update_bug_on_repeat(
@@ -305,6 +361,7 @@ impl Repository {
             created_at: record.now,
             updated_at: record.now,
         };
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             "INSERT INTO tickets (id, bug_id, provider, remote_id, remote_url, priority, recommendation, status, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
@@ -319,9 +376,26 @@ impl Repository {
         .bind(ticket.status.clone())
         .bind(ticket.created_at.to_rfc3339())
         .bind(ticket.updated_at.to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
+        insert_ticket_event_tx(
+            &mut tx,
+            &TicketEvent {
+                id: Uuid::new_v4(),
+                ticket_id: ticket.id,
+                bug_id: ticket.bug_id,
+                provider: ticket.provider,
+                action: TicketAction::Created,
+                comment: None,
+                previous_priority: None,
+                next_priority: Some(ticket.priority),
+                occurred_at: record.now,
+            },
+        )
+        .await?;
+
+        tx.commit().await?;
         Ok(ticket)
     }
 
@@ -329,44 +403,102 @@ impl Repository {
         sqlx::query_as::<_, TicketRow>(
             "SELECT id, bug_id, provider, remote_id, remote_url, priority, recommendation, status, created_at, updated_at FROM tickets WHERE bug_id = $1",
         )
-            .bind(bug_id.to_string())
-            .fetch_optional(&self.pool)
-            .await?
-            .map(TryInto::try_into)
-            .transpose()
+        .bind(bug_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
     }
 
-    pub async fn update_ticket_priority(
+    pub async fn list_ticket_events_for_bug(&self, bug_id: Uuid) -> AppResult<Vec<TicketEvent>> {
+        sqlx::query_as::<_, TicketEventRow>(
+            "SELECT id, ticket_id, bug_id, provider, action, comment, previous_priority, next_priority, occurred_at FROM ticket_events WHERE bug_id = $1 ORDER BY occurred_at ASC",
+        )
+        .bind(bug_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn escalate_ticket(
         &self,
-        ticket_id: Uuid,
+        ticket: &Ticket,
         priority: TicketPriority,
+        comment: &str,
         now: DateTime<Utc>,
-    ) -> AppResult<()> {
+    ) -> AppResult<Ticket> {
+        let mut tx = self.pool.begin().await?;
+
         sqlx::query("UPDATE tickets SET priority = $1, updated_at = $2 WHERE id = $3")
             .bind(priority.to_string())
             .bind(now.to_rfc3339())
-            .bind(ticket_id.to_string())
-            .execute(&self.pool)
+            .bind(ticket.id.to_string())
+            .execute(&mut *tx)
             .await?;
-        Ok(())
+        insert_ticket_comment_tx(&mut tx, ticket.id, comment, now).await?;
+        insert_ticket_event_tx(
+            &mut tx,
+            &TicketEvent {
+                id: Uuid::new_v4(),
+                ticket_id: ticket.id,
+                bug_id: ticket.bug_id,
+                provider: ticket.provider,
+                action: TicketAction::Escalated,
+                comment: Some(comment.to_string()),
+                previous_priority: Some(ticket.priority),
+                next_priority: Some(priority),
+                occurred_at: now,
+            },
+        )
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(Ticket {
+            priority,
+            updated_at: now,
+            ..ticket.clone()
+        })
     }
 
-    pub async fn add_ticket_comment(
+    pub async fn comment_on_ticket(
         &self,
-        ticket_id: Uuid,
+        ticket: &Ticket,
         comment: &str,
         now: DateTime<Utc>,
-    ) -> AppResult<()> {
-        sqlx::query(
-            "INSERT INTO ticket_comments (id, ticket_id, comment, created_at) VALUES ($1, $2, $3, $4)",
+    ) -> AppResult<Ticket> {
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query("UPDATE tickets SET updated_at = $1 WHERE id = $2")
+            .bind(now.to_rfc3339())
+            .bind(ticket.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        insert_ticket_comment_tx(&mut tx, ticket.id, comment, now).await?;
+        insert_ticket_event_tx(
+            &mut tx,
+            &TicketEvent {
+                id: Uuid::new_v4(),
+                ticket_id: ticket.id,
+                bug_id: ticket.bug_id,
+                provider: ticket.provider,
+                action: TicketAction::Commented,
+                comment: Some(comment.to_string()),
+                previous_priority: Some(ticket.priority),
+                next_priority: Some(ticket.priority),
+                occurred_at: now,
+            },
         )
-        .bind(Uuid::new_v4().to_string())
-        .bind(ticket_id.to_string())
-        .bind(comment)
-        .bind(now.to_rfc3339())
-        .execute(&self.pool)
         .await?;
-        Ok(())
+
+        tx.commit().await?;
+
+        Ok(Ticket {
+            updated_at: now,
+            ..ticket.clone()
+        })
     }
 
     pub async fn record_notification(
@@ -374,6 +506,8 @@ impl Repository {
         bug_id: Uuid,
         provider: NotificationProvider,
         message: &str,
+        severity: Severity,
+        ticket_action: TicketAction,
         now: DateTime<Utc>,
     ) -> AppResult<NotificationRecord> {
         let notification = NotificationRecord {
@@ -383,6 +517,7 @@ impl Repository {
             message: message.to_string(),
             sent_at: now,
         };
+        let mut tx = self.pool.begin().await?;
 
         sqlx::query(
             "INSERT INTO notifications (id, bug_id, provider, message, sent_at) VALUES ($1, $2, $3, $4, $5)",
@@ -392,10 +527,67 @@ impl Repository {
         .bind(notification.provider.to_string())
         .bind(notification.message.clone())
         .bind(notification.sent_at.to_rfc3339())
-        .execute(&self.pool)
+        .execute(&mut *tx)
+        .await?;
+        insert_notification_event_tx(
+            &mut tx,
+            &NotificationEvent {
+                id: Uuid::new_v4(),
+                bug_id,
+                provider,
+                status: NotificationEventStatus::Sent,
+                reason: "policy_allowed".to_string(),
+                message: Some(message.to_string()),
+                severity,
+                ticket_action,
+                occurred_at: now,
+            },
+        )
         .await?;
 
+        tx.commit().await?;
         Ok(notification)
+    }
+
+    pub async fn record_notification_skip(
+        &self,
+        bug_id: Uuid,
+        provider: NotificationProvider,
+        severity: Severity,
+        ticket_action: TicketAction,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<NotificationEvent> {
+        let event = NotificationEvent {
+            id: Uuid::new_v4(),
+            bug_id,
+            provider,
+            status: NotificationEventStatus::Skipped,
+            reason: reason.to_string(),
+            message: None,
+            severity,
+            ticket_action,
+            occurred_at: now,
+        };
+        let mut tx = self.pool.begin().await?;
+        insert_notification_event_tx(&mut tx, &event).await?;
+        tx.commit().await?;
+        Ok(event)
+    }
+
+    pub async fn list_notification_events_for_bug(
+        &self,
+        bug_id: Uuid,
+    ) -> AppResult<Vec<NotificationEvent>> {
+        sqlx::query_as::<_, NotificationEventRow>(
+            "SELECT id, bug_id, provider, status, reason, message, severity, ticket_action, occurred_at FROM notification_events WHERE bug_id = $1 ORDER BY occurred_at ASC",
+        )
+        .bind(bug_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
     }
 }
 
@@ -403,6 +595,141 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn build_provider_configs(account: &Account, now: DateTime<Utc>) -> Vec<AccountProviderConfig> {
+    let ai_provider = if account.use_managed_ai {
+        "managed"
+    } else {
+        "customer_managed"
+    };
+
+    vec![
+        AccountProviderConfig {
+            id: Uuid::new_v4(),
+            account_id: account.id,
+            kind: AccountProviderKind::Ticketing,
+            provider: account.ticket_provider.to_string(),
+            api_key: account.ticketing_api_key.clone(),
+            settings: json!({
+                "enabled": account.create_tickets,
+            }),
+            created_at: now,
+            updated_at: now,
+        },
+        AccountProviderConfig {
+            id: Uuid::new_v4(),
+            account_id: account.id,
+            kind: AccountProviderKind::Notification,
+            provider: account.notification_provider.to_string(),
+            api_key: account.notification_api_key.clone(),
+            settings: json!({
+                "notify_min_level": account.notify_min_level.to_string(),
+            }),
+            created_at: now,
+            updated_at: now,
+        },
+        AccountProviderConfig {
+            id: Uuid::new_v4(),
+            account_id: account.id,
+            kind: AccountProviderKind::Ai,
+            provider: ai_provider.to_string(),
+            api_key: account.ai_api_key.clone(),
+            settings: json!({
+                "enabled": account.ai_enabled,
+            }),
+            created_at: now,
+            updated_at: now,
+        },
+    ]
+}
+
+async fn insert_account_provider_config_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    config: &AccountProviderConfig,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO account_provider_configs (id, account_id, kind, provider, api_key, settings_json, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+    )
+    .bind(config.id.to_string())
+    .bind(config.account_id.to_string())
+    .bind(config.kind.to_string())
+    .bind(config.provider.clone())
+    .bind(config.api_key.clone())
+    .bind(serde_json::to_string(&config.settings)?)
+    .bind(config.created_at.to_rfc3339())
+    .bind(config.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_ticket_comment_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    ticket_id: Uuid,
+    comment: &str,
+    now: DateTime<Utc>,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO ticket_comments (id, ticket_id, comment, created_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(ticket_id.to_string())
+    .bind(comment)
+    .bind(now.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_ticket_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &TicketEvent,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO ticket_events (id, ticket_id, bug_id, provider, action, comment, previous_priority, next_priority, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(event.id.to_string())
+    .bind(event.ticket_id.to_string())
+    .bind(event.bug_id.to_string())
+    .bind(event.provider.to_string())
+    .bind(event.action.to_string())
+    .bind(event.comment.clone())
+    .bind(event.previous_priority.map(|value| value.to_string()))
+    .bind(event.next_priority.map(|value| value.to_string()))
+    .bind(event.occurred_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_notification_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &NotificationEvent,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO notification_events (id, bug_id, provider, status, reason, message, severity, ticket_action, occurred_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(event.id.to_string())
+    .bind(event.bug_id.to_string())
+    .bind(event.provider.to_string())
+    .bind(event.status.to_string())
+    .bind(event.reason.clone())
+    .bind(event.message.clone())
+    .bind(event.severity.to_string())
+    .bind(event.ticket_action.to_string())
+    .bind(event.occurred_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+fn parse_rfc3339_utc(value: &str) -> AppResult<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(value)?.with_timezone(&Utc))
 }
 
 #[derive(Debug, FromRow)]
@@ -440,6 +767,35 @@ impl TryFrom<AccountRow> for Account {
             notify_min_level: Severity::from_str(&row.notify_min_level)?,
             rapid_occurrence_window_minutes: row.rapid_occurrence_window_minutes as i64,
             rapid_occurrence_threshold: row.rapid_occurrence_threshold as i64,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct AccountProviderConfigRow {
+    id: String,
+    account_id: String,
+    kind: String,
+    provider: String,
+    api_key: Option<String>,
+    settings_json: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<AccountProviderConfigRow> for AccountProviderConfig {
+    type Error = AppError;
+
+    fn try_from(row: AccountProviderConfigRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            account_id: Uuid::parse_str(&row.account_id)?,
+            kind: AccountProviderKind::from_str(&row.kind)?,
+            provider: row.provider,
+            api_key: normalize_optional(row.api_key),
+            settings: serde_json::from_str(&row.settings_json)?,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
         })
     }
 }
@@ -495,9 +851,38 @@ impl TryFrom<BugRow> for Bug {
             stacktrace_hash: row.stacktrace_hash,
             normalized_stacktrace: row.normalized_stacktrace,
             latest_stacktrace: row.latest_stacktrace,
-            first_seen_at: DateTime::parse_from_rfc3339(&row.first_seen_at)?.with_timezone(&Utc),
-            last_seen_at: DateTime::parse_from_rfc3339(&row.last_seen_at)?.with_timezone(&Utc),
+            first_seen_at: parse_rfc3339_utc(&row.first_seen_at)?,
+            last_seen_at: parse_rfc3339_utc(&row.last_seen_at)?,
             occurrence_count: row.occurrence_count as i64,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct OccurrenceRow {
+    id: String,
+    bug_id: String,
+    severity: String,
+    stacktrace: String,
+    occurred_at: String,
+    service: Option<String>,
+    environment: Option<String>,
+    attributes_json: String,
+}
+
+impl TryFrom<OccurrenceRow> for Occurrence {
+    type Error = AppError;
+
+    fn try_from(row: OccurrenceRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            bug_id: Uuid::parse_str(&row.bug_id)?,
+            severity: Severity::from_str(&row.severity)?,
+            stacktrace: row.stacktrace,
+            occurred_at: parse_rfc3339_utc(&row.occurred_at)?,
+            service: row.service,
+            environment: row.environment,
+            attributes: serde_json::from_str(&row.attributes_json)?,
         })
     }
 }
@@ -529,8 +914,78 @@ impl TryFrom<TicketRow> for Ticket {
             priority: TicketPriority::from_str(&row.priority)?,
             recommendation: row.recommendation,
             status: row.status,
-            created_at: DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&Utc),
-            updated_at: DateTime::parse_from_rfc3339(&row.updated_at)?.with_timezone(&Utc),
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct TicketEventRow {
+    id: String,
+    ticket_id: String,
+    bug_id: String,
+    provider: String,
+    action: String,
+    comment: Option<String>,
+    previous_priority: Option<String>,
+    next_priority: Option<String>,
+    occurred_at: String,
+}
+
+impl TryFrom<TicketEventRow> for TicketEvent {
+    type Error = AppError;
+
+    fn try_from(row: TicketEventRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            ticket_id: Uuid::parse_str(&row.ticket_id)?,
+            bug_id: Uuid::parse_str(&row.bug_id)?,
+            provider: TicketProvider::from_str(&row.provider)?,
+            action: TicketAction::from_str(&row.action)?,
+            comment: row.comment,
+            previous_priority: row
+                .previous_priority
+                .as_deref()
+                .map(TicketPriority::from_str)
+                .transpose()?,
+            next_priority: row
+                .next_priority
+                .as_deref()
+                .map(TicketPriority::from_str)
+                .transpose()?,
+            occurred_at: parse_rfc3339_utc(&row.occurred_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct NotificationEventRow {
+    id: String,
+    bug_id: String,
+    provider: String,
+    status: String,
+    reason: String,
+    message: Option<String>,
+    severity: String,
+    ticket_action: String,
+    occurred_at: String,
+}
+
+impl TryFrom<NotificationEventRow> for NotificationEvent {
+    type Error = AppError;
+
+    fn try_from(row: NotificationEventRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            bug_id: Uuid::parse_str(&row.bug_id)?,
+            provider: NotificationProvider::from_str(&row.provider)?,
+            status: NotificationEventStatus::from_str(&row.status)?,
+            reason: row.reason,
+            message: row.message,
+            severity: Severity::from_str(&row.severity)?,
+            ticket_action: TicketAction::from_str(&row.ticket_action)?,
+            occurred_at: parse_rfc3339_utc(&row.occurred_at)?,
         })
     }
 }

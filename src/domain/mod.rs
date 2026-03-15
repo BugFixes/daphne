@@ -133,6 +133,40 @@ impl FromStr for NotificationProvider {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountProviderKind {
+    Ticketing,
+    Notification,
+    Ai,
+}
+
+impl fmt::Display for AccountProviderKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Ticketing => "ticketing",
+            Self::Notification => "notification",
+            Self::Ai => "ai",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for AccountProviderKind {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ticketing" => Ok(Self::Ticketing),
+            "notification" => Ok(Self::Notification),
+            "ai" => Ok(Self::Ai),
+            _ => Err(AppError::Validation(format!(
+                "unsupported account provider kind: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketPriority {
@@ -216,6 +250,18 @@ pub struct Account {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountProviderConfig {
+    pub id: Uuid,
+    pub account_id: Uuid,
+    pub kind: AccountProviderKind,
+    pub provider: String,
+    pub api_key: Option<String>,
+    pub settings: Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: Uuid,
     pub account_id: Uuid,
@@ -245,6 +291,18 @@ pub struct Bug {
     pub first_seen_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
     pub occurrence_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Occurrence {
+    pub id: Uuid,
+    pub bug_id: Uuid,
+    pub severity: Severity,
+    pub stacktrace: String,
+    pub occurred_at: DateTime<Utc>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    pub attributes: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -468,6 +526,80 @@ impl fmt::Display for TicketAction {
         };
         write!(f, "{value}")
     }
+}
+
+impl FromStr for TicketAction {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "created" => Ok(Self::Created),
+            "escalated" => Ok(Self::Escalated),
+            "commented" => Ok(Self::Commented),
+            "unchanged" => Ok(Self::Unchanged),
+            "skipped" => Ok(Self::Skipped),
+            _ => Err(AppError::Validation(format!(
+                "unsupported ticket action: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TicketEvent {
+    pub id: Uuid,
+    pub ticket_id: Uuid,
+    pub bug_id: Uuid,
+    pub provider: TicketProvider,
+    pub action: TicketAction,
+    pub comment: Option<String>,
+    pub previous_priority: Option<TicketPriority>,
+    pub next_priority: Option<TicketPriority>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationEventStatus {
+    Sent,
+    Skipped,
+}
+
+impl fmt::Display for NotificationEventStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Sent => "sent",
+            Self::Skipped => "skipped",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for NotificationEventStatus {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "sent" => Ok(Self::Sent),
+            "skipped" => Ok(Self::Skipped),
+            _ => Err(AppError::Validation(format!(
+                "unsupported notification event status: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationEvent {
+    pub id: Uuid,
+    pub bug_id: Uuid,
+    pub provider: NotificationProvider,
+    pub status: NotificationEventStatus,
+    pub reason: String,
+    pub message: Option<String>,
+    pub severity: Severity,
+    pub ticket_action: TicketAction,
+    pub occurred_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

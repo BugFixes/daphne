@@ -6,13 +6,13 @@ use serial_test::serial;
 use crate::{
     ai::AiRegistry,
     domain::{
-        CreateAccountRequest, CreateAgentRequest, NotificationProvider, Severity, StacktraceEvent,
-        TicketAction, TicketPriority, TicketProvider,
+        CreateAccountRequest, CreateAgentRequest, NotificationEventStatus, NotificationProvider,
+        Severity, StacktraceEvent, TicketAction, TicketPriority, TicketProvider,
     },
     feature_flags::build_feature_flags,
     notifications::NotificationRegistry,
     policy::build_policy_engine,
-    repository::{CreateBugRecord, Repository},
+    repository::{CreateBugRecord, RecordOccurrence, Repository},
     test_support::{reset_database, test_config_with_disabled_features},
     ticketing::TicketingRegistry,
 };
@@ -414,6 +414,7 @@ async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
     let normalized_stacktrace = super::normalize_stacktrace(stacktrace);
     let stacktrace_hash = super::hash_stacktrace(&normalized_stacktrace);
     let occurred_at = Utc::now();
+    let attributes = Default::default();
 
     let bug = service
         .repository
@@ -431,7 +432,15 @@ async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
         .expect("bug");
     service
         .repository
-        .record_occurrence(bug.id, Severity::Error, stacktrace, occurred_at)
+        .record_occurrence(RecordOccurrence {
+            bug_id: bug.id,
+            severity: Severity::Error,
+            stacktrace,
+            occurred_at,
+            service: None,
+            environment: None,
+            attributes: &attributes,
+        })
         .await
         .expect("occurrence");
 
@@ -549,6 +558,26 @@ async fn deduplicates_by_normalized_stacktrace_and_updates_derived_bug_fields() 
     assert_eq!(bug.first_seen_at, first_occurred_at);
     assert_eq!(bug.last_seen_at, second_occurred_at);
     assert_eq!(bug.occurrence_count, 2);
+
+    let occurrences = service
+        .repository
+        .list_occurrences_for_bug(bug.id)
+        .await
+        .expect("occurrences");
+
+    assert_eq!(occurrences.len(), 2);
+    assert_eq!(occurrences[0].service.as_deref(), Some("api"));
+    assert_eq!(occurrences[0].environment.as_deref(), Some("prod"));
+    assert_eq!(
+        occurrences[0].attributes.get("release").map(String::as_str),
+        Some("1.0.0")
+    );
+    assert_eq!(occurrences[1].service.as_deref(), Some("worker"));
+    assert_eq!(occurrences[1].environment.as_deref(), Some("staging"));
+    assert_eq!(
+        occurrences[1].attributes.get("release").map(String::as_str),
+        Some("1.0.1")
+    );
 }
 
 #[tokio::test]
@@ -618,9 +647,42 @@ async fn comments_on_repeat_bug_before_reaching_escalation_threshold() {
     assert_eq!(second.ticket_action, TicketAction::Commented);
     assert_eq!(second.occurrence_count, 2);
     assert!(!second.notification.sent);
+    let second_ticket = second.ticket.clone().expect("ticket");
+    assert_eq!(second_ticket.priority, TicketPriority::Medium);
+
+    let ticket_events = service
+        .repository
+        .list_ticket_events_for_bug(first.bug_id)
+        .await
+        .expect("ticket events");
+    let notification_events = service
+        .repository
+        .list_notification_events_for_bug(first.bug_id)
+        .await
+        .expect("notification events");
+
+    assert_eq!(ticket_events.len(), 2);
+    assert_eq!(ticket_events[0].action, TicketAction::Created);
+    assert_eq!(ticket_events[0].next_priority, Some(TicketPriority::Medium));
+    assert_eq!(ticket_events[1].action, TicketAction::Commented);
     assert_eq!(
-        second.ticket.expect("ticket").priority,
-        TicketPriority::Medium
+        ticket_events[1].previous_priority,
+        Some(TicketPriority::Medium)
+    );
+    assert_eq!(ticket_events[1].next_priority, Some(TicketPriority::Medium));
+    assert_eq!(ticket_events[1].occurred_at, second_ticket.updated_at);
+
+    assert_eq!(notification_events.len(), 2);
+    assert_eq!(notification_events[0].status, NotificationEventStatus::Sent);
+    assert_eq!(notification_events[0].ticket_action, TicketAction::Created);
+    assert_eq!(
+        notification_events[1].status,
+        NotificationEventStatus::Skipped
+    );
+    assert_eq!(notification_events[1].reason, "policy_denied");
+    assert_eq!(
+        notification_events[1].ticket_action,
+        TicketAction::Commented
     );
 }
 
@@ -764,4 +826,70 @@ async fn does_not_deduplicate_meaningfully_different_stacktraces() {
     assert!(first.is_new_bug);
     assert!(second.is_new_bug);
     assert_ne!(first.stacktrace_hash, second.stacktrace_hash);
+}
+
+#[tokio::test]
+#[serial]
+async fn deduplicates_go_stacktraces_with_different_goroutine_ids() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Mu".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::Github,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Fatal,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let occurred_at = Utc::now();
+
+    let first = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "go".to_string(),
+            stacktrace: "goroutine 18 [running]:\npanic: worker crashed\nmain.run()".to_string(),
+            level: Severity::Error,
+            occurred_at: Some(occurred_at),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("first ingest");
+    let second = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "go".to_string(),
+            stacktrace: "goroutine 42 [running]:\npanic: worker crashed\nmain.run()".to_string(),
+            level: Severity::Error,
+            occurred_at: Some(occurred_at + chrono::Duration::minutes(1)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("second ingest");
+
+    assert!(first.is_new_bug);
+    assert!(!second.is_new_bug);
+    assert_eq!(first.stacktrace_hash, second.stacktrace_hash);
 }
