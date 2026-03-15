@@ -179,7 +179,7 @@ The intake model is stacktrace-first:
 
 A deduplicated bug is currently defined by the tuple `account_id + stacktrace_hash`.
 
-`stacktrace_hash` is derived as `sha256(normalize(stacktrace))`. The current normalization trims each line, drops empty lines, and replaces hex memory addresses with `0xADDR` before hashing.
+`stacktrace_hash` is derived as `sha256(normalize(stacktrace))`. The current normalization trims each line, drops empty lines, replaces hex memory addresses with `0xADDR`, and normalizes Go goroutine ids to `goroutine N` before hashing.
 
 Field roles in the canonical event:
 
@@ -201,16 +201,18 @@ Current bug record semantics that are easy to miss:
 
 - `language` is stored on the bug, but it is copied from the first occurrence and is not part of deduplication
 - `agent_id` is also copied from the first occurrence that created the bug
-- `service`, `environment`, and `attributes` are accepted on canonical events but do not currently participate in deduplication or persistence
+- `service`, `environment`, and `attributes` are stored on each occurrence for audit and future dashboard use, but they do not participate in deduplication
 
 ## Data model
 
 - `accounts` own the policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
+- `account_provider_configs` stores the current per-account provider snapshot for ticketing, notifications, and AI mode.
 - `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`.
 - `bugs` are deduplicated by `account_id + stacktrace_hash`.
-- `occurrences` store each event so rapid-repeat detection can be based on time windows.
+- `occurrences` store each event, including `service`, `environment`, and free-form attributes, so rapid-repeat detection and future drill-down screens can use the original context.
 - `tickets` store the external issue reference plus AI recommendation and current priority.
-- `notifications` and `ticket_comments` keep a local audit trail.
+- `ticket_events` records ticket creation, comments, and escalations alongside the existing `ticket_comments` text history.
+- `notification_events` records both sent and skipped notification decisions, while `notifications` keeps the sent-message audit trail.
 
 ## Feature Flags
 

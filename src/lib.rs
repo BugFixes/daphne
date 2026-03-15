@@ -40,6 +40,8 @@ pub enum AppError {
     #[error(transparent)]
     Chrono(#[from] chrono::ParseError),
     #[error(transparent)]
+    SerdeJson(#[from] serde_json::Error),
+    #[error(transparent)]
     Join(#[from] tokio::task::JoinError),
     #[error("{0}")]
     Internal(String),
@@ -60,6 +62,7 @@ impl IntoResponse for AppError {
             | Self::AddrParse(_)
             | Self::Uuid(_)
             | Self::Chrono(_)
+            | Self::SerdeJson(_)
             | Self::Join(_)
             | Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
