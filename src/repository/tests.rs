@@ -4,7 +4,9 @@ use serial_test::serial;
 
 use crate::{
     domain::{
-        AccountProviderKind, CreateAccountRequest, NotificationProvider, Severity, TicketProvider,
+        AccountProviderKind, AddOrganizationMemberRequest, CreateAccountRequest,
+        CreateOrganizationRequest, NotificationProvider, OrganizationRole, Severity,
+        TicketProvider, UpdateOrganizationMembershipRequest,
     },
     test_support::{reset_database, test_config_with_disabled_features},
 };
@@ -21,7 +23,7 @@ async fn connects_to_postgres_after_running_migrations() {
         .await
         .expect("migration count");
 
-    assert!(migration_count >= 4);
+    assert!(migration_count >= 5);
 }
 
 #[tokio::test]
@@ -33,6 +35,7 @@ async fn persists_account_provider_config_snapshots() {
 
     let account = repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Acme".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
@@ -71,4 +74,67 @@ async fn persists_account_provider_config_snapshots() {
             && config.api_key.as_deref() == Some("openai_test_key")
             && config.settings["enabled"] == true
     }));
+    assert_ne!(account.organization_id, account.id);
+}
+
+#[tokio::test]
+#[serial]
+async fn manages_organization_memberships() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let organization = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "Acme".to_string(),
+            owner_email: "owner@acme.test".to_string(),
+            owner_name: "Owner".to_string(),
+        })
+        .await
+        .expect("organization");
+
+    let organizations = repository
+        .list_organizations_for_user("owner@acme.test")
+        .await
+        .expect("organizations");
+    assert_eq!(organizations.len(), 1);
+    assert_eq!(
+        organizations[0].organization.id,
+        organization.organization.id
+    );
+    assert_eq!(organizations[0].membership.role, OrganizationRole::Owner);
+
+    let membership = repository
+        .add_organization_member(
+            organization.organization.id,
+            "owner@acme.test",
+            AddOrganizationMemberRequest {
+                email: "member@acme.test".to_string(),
+                name: "Member".to_string(),
+                role: OrganizationRole::Member,
+            },
+        )
+        .await
+        .expect("membership");
+    assert_eq!(membership.user.email, "member@acme.test");
+    assert_eq!(membership.membership.role, OrganizationRole::Member);
+
+    let memberships = repository
+        .list_organization_memberships(organization.organization.id, "member@acme.test")
+        .await
+        .expect("memberships");
+    assert_eq!(memberships.len(), 2);
+
+    let updated = repository
+        .update_organization_membership(
+            organization.organization.id,
+            membership.membership.id,
+            "owner@acme.test",
+            UpdateOrganizationMembershipRequest {
+                role: OrganizationRole::Admin,
+            },
+        )
+        .await
+        .expect("updated membership");
+    assert_eq!(updated.membership.role, OrganizationRole::Admin);
 }

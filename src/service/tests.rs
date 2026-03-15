@@ -77,6 +77,7 @@ async fn creates_ticket_and_notification_for_new_bug() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Acme".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Linear,
@@ -138,6 +139,7 @@ async fn escalates_existing_bug_when_it_repeats_rapidly() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Beta".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
@@ -208,6 +210,7 @@ async fn suppresses_debug_notification() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Gamma".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Tracklines,
@@ -258,6 +261,7 @@ async fn skips_ticket_creation_when_ticket_provider_flag_is_disabled() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Delta".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
@@ -310,6 +314,7 @@ async fn skips_notification_when_notification_provider_flag_is_disabled() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Epsilon".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Github,
@@ -362,6 +367,7 @@ async fn skips_ai_when_account_uses_customer_managed_ai_without_api_key() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Zeta".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Linear,
@@ -415,6 +421,7 @@ async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Eta".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
@@ -500,6 +507,7 @@ async fn deduplicates_by_normalized_stacktrace_and_updates_derived_bug_fields() 
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Theta".to_string(),
             create_tickets: false,
             ticket_provider: TicketProvider::Github,
@@ -615,6 +623,7 @@ async fn comments_on_repeat_bug_before_reaching_escalation_threshold() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Iota".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,
@@ -721,6 +730,7 @@ async fn comments_on_repeat_bug_when_ticket_priority_is_already_critical() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Kappa".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Linear,
@@ -794,6 +804,7 @@ async fn does_not_deduplicate_meaningfully_different_stacktraces() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Lambda".to_string(),
             create_tickets: false,
             ticket_provider: TicketProvider::Github,
@@ -863,6 +874,7 @@ async fn deduplicates_go_stacktraces_with_different_goroutine_ids() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Mu".to_string(),
             create_tickets: false,
             ticket_provider: TicketProvider::Github,
@@ -929,6 +941,7 @@ async fn stores_logs_without_creating_bug_records() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Nu".to_string(),
             create_tickets: false,
             ticket_provider: TicketProvider::Github,
@@ -1000,6 +1013,7 @@ async fn archives_and_trims_logs_older_than_retention_window() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Xi".to_string(),
             create_tickets: false,
             ticket_provider: TicketProvider::Github,
@@ -1089,6 +1103,7 @@ async fn suppresses_repeat_notifications_inside_cooldown_window() {
     let account = service
         .repository
         .create_account(CreateAccountRequest {
+            organization_id: None,
             name: "Omicron".to_string(),
             create_tickets: true,
             ticket_provider: TicketProvider::Jira,

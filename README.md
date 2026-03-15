@@ -9,12 +9,17 @@
 - escalate or comment on the existing ticket when the bug repeats
 - store non-bug logs separately and periodically archive/trim old log volume
 
-Ticketing, notification, and AI execution are policy-gated from raw account context. The service sends the chosen provider or advisor, whether that integration is enabled, and any configured credential to the policy engine, and the policy decides whether the action is allowed.
+Ticketing, notification, and AI execution are policy-gated from raw account context. Organizations now provide the ownership boundary above accounts, while accounts continue to hold the operational policy and provider configuration used by ingestion. The service sends the chosen provider or advisor, whether that integration is enabled, and any configured credential to the policy engine, and the policy decides whether the action is allowed.
 
 This repository is a fresh implementation. The abandoned Go prototype in `../celeste` was used only as a reference for system boundaries.
 
 ## What exists now
 
+- `POST /v1/organizations` creates an organization, an owner user, and an owner membership.
+- `GET /v1/organizations` lists organizations the current user can access. This currently uses the `X-User-Email` header until auth middleware exists.
+- `POST /v1/organizations/{organization_id}/memberships` adds a member to an organization.
+- `GET /v1/organizations/{organization_id}/memberships` lists memberships for an organization.
+- `PATCH /v1/organizations/{organization_id}/memberships/{membership_id}` updates a membership role.
 - `POST /v1/accounts` creates an account with ticketing and notification policy.
 - `POST /v1/agents` creates an agent and returns its `api_key` and `api_secret`.
 - `POST /v1/log` accepts raw `go-bugfixes/logs` and `bugfixes-rs` log payloads and stores them in the log stream.
@@ -106,12 +111,45 @@ When authoring migrations for this project:
 
 ## Example flow
 
-Create an account:
+Create an organization:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/organizations \
+  -H 'content-type: application/json' \
+  -d '{
+    "name": "Acme",
+    "owner_email": "owner@acme.test",
+    "owner_name": "Acme Owner"
+  }'
+```
+
+List organizations for the current user:
+
+```bash
+curl http://127.0.0.1:3000/v1/organizations \
+  -H 'X-User-Email: owner@acme.test'
+```
+
+Add an organization member:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/organizations/REPLACE_WITH_ORGANIZATION_ID/memberships \
+  -H 'content-type: application/json' \
+  -H 'X-User-Email: owner@acme.test' \
+  -d '{
+    "email": "admin@acme.test",
+    "name": "Admin User",
+    "role": "admin"
+  }'
+```
+
+Create an account inside an organization:
 
 ```bash
 curl -X POST http://127.0.0.1:3000/v1/accounts \
   -H 'content-type: application/json' \
   -d '{
+    "organization_id": "REPLACE_WITH_ORGANIZATION_ID",
     "name": "Acme",
     "create_tickets": true,
     "ticket_provider": "jira",
@@ -125,6 +163,8 @@ curl -X POST http://127.0.0.1:3000/v1/accounts \
     "rapid_occurrence_threshold": 3
   }'
 ```
+
+`POST /v1/accounts` still accepts requests without `organization_id` for compatibility. In that case the service creates a standalone organization shell with the same name as the account, but no user memberships. Dashboard onboarding should use `POST /v1/organizations` first and then create accounts inside that organization.
 
 Create an agent:
 
@@ -192,6 +232,8 @@ The intake model is stacktrace-first:
 
 A deduplicated bug is currently defined by the tuple `account_id + stacktrace_hash`.
 
+`account_id` remains the operational deduplication boundary, and each account now belongs to exactly one organization.
+
 `stacktrace_hash` is derived as `sha256(normalize(stacktrace))`. The current normalization trims each line, drops empty lines, replaces hex memory addresses with `0xADDR`, and normalizes Go goroutine ids to `goroutine N` before hashing.
 
 Field roles in the canonical event:
@@ -218,9 +260,12 @@ Current bug record semantics that are easy to miss:
 
 ## Data model
 
-- `accounts` own the policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
+- `organizations` are the top-level ownership boundary for dashboard onboarding, member management, and future auth, audit, and billing work.
+- `users` represent human operators identified by email.
+- `memberships` connect users to organizations with `owner`, `admin`, or `member` roles.
+- `accounts` belong to organizations and own the operational policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
 - `account_provider_configs` stores the current per-account provider snapshot for ticketing, notifications, and AI mode.
-- `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`.
+- `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`, and each agent remains attached to an account inside an organization.
 - `bugs` are deduplicated by `account_id + stacktrace_hash`.
 - `occurrences` store each event, including `service`, `environment`, and free-form attributes, so rapid-repeat detection and future drill-down screens can use the original context.
 - `logs` stores non-bug log events separately from the deduplicated bug model.
@@ -296,3 +341,10 @@ When `BUGFIXES_POLICY_PROVIDER=policy2`, `policy2` is authoritative for the `tru
 - add richer normalization per language runtime so equivalent traces hash together more reliably
 - add request fixtures derived from `../go-bugfixes` so the agent and service contract stays locked together
 - add request fixtures derived from both `../go-bugfixes` and `../bugfixes-rs` so agent compatibility is tested, not assumed
+
+## Migration path
+
+- Existing rows are backfilled into `organizations` during migration by creating one organization per existing account and linking `accounts.organization_id` to that new parent.
+- Existing ingestion, provider configuration, bugs, logs, and agents continue to work unchanged because their account references stay stable.
+- Legacy accounts do not gain inferred memberships during migration because the previous schema had no durable human-user identity to map from.
+- New dashboard onboarding should create organizations and memberships first, then create one or more accounts inside that organization.
