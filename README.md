@@ -234,7 +234,14 @@ A deduplicated bug is currently defined by the tuple `account_id + stacktrace_ha
 
 `account_id` remains the operational deduplication boundary, and each account now belongs to exactly one organization.
 
-`stacktrace_hash` is derived as `sha256(normalize(stacktrace))`. The current normalization trims each line, drops empty lines, replaces hex memory addresses with `0xADDR`, and normalizes Go goroutine ids to `goroutine N` before hashing.
+`stacktrace_hash` is derived as `sha256(normalize(language, stacktrace))`.
+
+Current normalization behavior:
+
+- all traces: trim each line, drop empty lines, and replace hex memory addresses with `0xADDR`
+- Go traces: also normalize goroutine ids to `goroutine N` and PC offsets like `+0x47` to `+0xOFFSET`
+- Rust traces: also normalize symbol hashes like `::h1234...` to `::hHASH` and rustc source paths like `/rustc/<commit>/...` to `/rustc/RUSTC/...`
+- unknown languages: use only the shared normalization rules above until a dedicated rule is added
 
 Field roles in the canonical event:
 

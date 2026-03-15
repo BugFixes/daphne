@@ -1,0 +1,5 @@
+goroutine 42 [running]:
+main.(*Worker).Run(0x14000aa00f0)
+    /srv/app/worker.go:87 +0x91
+created by main.main in goroutine 7
+    /srv/app/main.go:42 +0x6c

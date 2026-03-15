@@ -20,6 +20,13 @@ use crate::{
 
 use super::{IntakeService, IntakeServiceSettings};
 
+const GO_EQUIVALENT_TRACE_A: &str = include_str!("fixtures/go_equivalent_a.txt");
+const GO_EQUIVALENT_TRACE_B: &str = include_str!("fixtures/go_equivalent_b.txt");
+const RUST_EQUIVALENT_TRACE_A: &str = include_str!("fixtures/rust_equivalent_a.txt");
+const RUST_EQUIVALENT_TRACE_B: &str = include_str!("fixtures/rust_equivalent_b.txt");
+const RUST_DISTINCT_TRACE_A: &str = include_str!("fixtures/rust_distinct_a.txt");
+const RUST_DISTINCT_TRACE_B: &str = include_str!("fixtures/rust_distinct_b.txt");
+
 async fn test_service() -> IntakeService {
     test_service_with_disabled_features(HashSet::new()).await
 }
@@ -446,7 +453,7 @@ async fn creates_ticket_for_repeat_bug_when_bug_exists_without_ticket() {
         .await
         .expect("agent");
     let stacktrace = "panic: missing ticket for existing bug";
-    let normalized_stacktrace = super::normalize_stacktrace(stacktrace);
+    let normalized_stacktrace = super::normalize_stacktrace("rust", stacktrace);
     let stacktrace_hash = super::hash_stacktrace(&normalized_stacktrace);
     let occurred_at = Utc::now();
     let attributes = Default::default();
@@ -588,7 +595,7 @@ async fn deduplicates_by_normalized_stacktrace_and_updates_derived_bug_fields() 
     assert_eq!(bug.severity, Severity::Fatal);
     assert_eq!(
         bug.normalized_stacktrace,
-        super::normalize_stacktrace(first_stacktrace)
+        super::normalize_stacktrace("rust", first_stacktrace)
     );
     assert_eq!(bug.latest_stacktrace, second_stacktrace);
     assert_eq!(bug.first_seen_at, first_occurred_at);
@@ -932,6 +939,34 @@ async fn deduplicates_go_stacktraces_with_different_goroutine_ids() {
     assert!(first.is_new_bug);
     assert!(!second.is_new_bug);
     assert_eq!(first.stacktrace_hash, second.stacktrace_hash);
+}
+
+#[test]
+fn normalizes_equivalent_go_fixture_stacktraces() {
+    let first = super::normalize_stacktrace("go", GO_EQUIVALENT_TRACE_A);
+    let second = super::normalize_stacktrace("go", GO_EQUIVALENT_TRACE_B);
+
+    assert_eq!(first, second);
+    assert!(first.contains("goroutine N [running]:"));
+    assert!(first.contains("/srv/app/worker.go:87 +0xOFFSET"));
+}
+
+#[test]
+fn normalizes_equivalent_rust_fixture_stacktraces() {
+    let first = super::normalize_stacktrace("rust", RUST_EQUIVALENT_TRACE_A);
+    let second = super::normalize_stacktrace("rust", RUST_EQUIVALENT_TRACE_B);
+
+    assert_eq!(first, second);
+    assert!(first.contains("0xADDR - my_app::worker::run::hHASH"));
+    assert!(first.contains("at /rustc/RUSTC/library/std/src/sys/backtrace.rs:158:18"));
+}
+
+#[test]
+fn keeps_distinct_rust_fixture_stacktraces_separate() {
+    let first = super::normalize_stacktrace("rust", RUST_DISTINCT_TRACE_A);
+    let second = super::normalize_stacktrace("rust", RUST_DISTINCT_TRACE_B);
+
+    assert_ne!(first, second);
 }
 
 #[tokio::test]
