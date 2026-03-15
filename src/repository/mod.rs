@@ -9,10 +9,12 @@ use crate::{
     AppError, AppResult,
     config::Config,
     domain::{
-        Account, AccountProviderConfig, AccountProviderKind, Agent, Bug, CreateAccountRequest,
-        CreateAgentRequest, LogArchive, LogRecord, NotificationEvent, NotificationEventStatus,
-        NotificationProvider, NotificationRecord, Occurrence, Severity, Ticket, TicketAction,
-        TicketEvent, TicketPriority, TicketProvider,
+        Account, AccountProviderConfig, AccountProviderKind, AddOrganizationMemberRequest, Agent,
+        Bug, CreateAccountRequest, CreateAgentRequest, CreateOrganizationRequest, LogArchive,
+        LogRecord, Membership, MembershipRecord, NotificationEvent, NotificationEventStatus,
+        NotificationProvider, NotificationRecord, Occurrence, Organization, OrganizationAccess,
+        OrganizationRole, Severity, Ticket, TicketAction, TicketEvent, TicketPriority,
+        TicketProvider, UpdateOrganizationMembershipRequest, User, normalize_email,
     },
     migrations,
 };
@@ -83,31 +85,234 @@ impl Repository {
         Ok(Self { pool })
     }
 
-    pub async fn create_account(&self, request: CreateAccountRequest) -> AppResult<Account> {
+    pub async fn create_organization(
+        &self,
+        request: CreateOrganizationRequest,
+    ) -> AppResult<OrganizationAccess> {
         request.validate()?;
-        let account = Account {
-            id: Uuid::new_v4(),
-            name: request.name,
-            create_tickets: request.create_tickets,
-            ticket_provider: request.ticket_provider,
-            ticketing_api_key: normalize_optional(request.ticketing_api_key),
-            notification_provider: request.notification_provider,
-            notification_api_key: normalize_optional(request.notification_api_key),
-            ai_enabled: request.ai_enabled,
-            use_managed_ai: request.use_managed_ai,
-            ai_api_key: normalize_optional(request.ai_api_key),
-            notify_min_level: request.notify_min_level,
-            rapid_occurrence_window_minutes: request.rapid_occurrence_window_minutes,
-            rapid_occurrence_threshold: request.rapid_occurrence_threshold,
-        };
+        let owner_email = normalize_user_email(&request.owner_email)?;
         let now = Utc::now();
-        let provider_configs = build_provider_configs(&account, now);
+        let organization = Organization {
+            id: Uuid::new_v4(),
+            name: request.name.trim().to_string(),
+            created_at: now,
+            updated_at: now,
+        };
         let mut tx = self.pool.begin().await?;
 
+        insert_organization_tx(&mut tx, &organization).await?;
+        let user = find_or_create_user_tx(&mut tx, &owner_email, &request.owner_name, now).await?;
+        let membership = Membership {
+            id: Uuid::new_v4(),
+            organization_id: organization.id,
+            user_id: user.id,
+            role: OrganizationRole::Owner,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_membership_tx(&mut tx, &membership).await?;
+
+        tx.commit().await?;
+
+        Ok(OrganizationAccess {
+            organization,
+            membership,
+        })
+    }
+
+    pub async fn list_organizations_for_user(
+        &self,
+        user_email: &str,
+    ) -> AppResult<Vec<OrganizationAccess>> {
+        let user_email = normalize_user_email(user_email)?;
+
+        sqlx::query_as::<_, OrganizationAccessRow>(
+            "SELECT o.id AS organization_id, o.name AS organization_name, o.created_at AS organization_created_at, o.updated_at AS organization_updated_at, m.id AS membership_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at FROM memberships m JOIN organizations o ON o.id = m.organization_id JOIN users u ON u.id = m.user_id WHERE u.email = $1 ORDER BY o.created_at ASC",
+        )
+        .bind(user_email)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn add_organization_member(
+        &self,
+        organization_id: Uuid,
+        actor_email: &str,
+        request: AddOrganizationMemberRequest,
+    ) -> AppResult<MembershipRecord> {
+        request.validate()?;
+        let actor_membership = self
+            .find_membership_for_user_email(organization_id, actor_email)
+            .await?;
+        if !actor_membership.role.can_manage_memberships() {
+            return Err(AppError::Validation(
+                "only organization owners and admins can manage memberships".to_string(),
+            ));
+        }
+
+        let member_email = normalize_user_email(&request.email)?;
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
+        let user = find_or_create_user_tx(&mut tx, &member_email, &request.name, now).await?;
+
+        if find_membership_for_user_id_tx(&mut tx, organization_id, user.id)
+            .await?
+            .is_some()
+        {
+            return Err(AppError::Validation(
+                "user is already a member of this organization".to_string(),
+            ));
+        }
+
+        let membership = Membership {
+            id: Uuid::new_v4(),
+            organization_id,
+            user_id: user.id,
+            role: request.role,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_membership_tx(&mut tx, &membership).await?;
+        tx.commit().await?;
+
+        Ok(MembershipRecord { membership, user })
+    }
+
+    pub async fn list_organization_memberships(
+        &self,
+        organization_id: Uuid,
+        actor_email: &str,
+    ) -> AppResult<Vec<MembershipRecord>> {
+        self.find_membership_for_user_email(organization_id, actor_email)
+            .await?;
+
+        sqlx::query_as::<_, MembershipRecordRow>(
+            "SELECT m.id AS membership_id, m.organization_id AS membership_organization_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at, u.email AS user_email, u.name AS user_name, u.created_at AS user_created_at, u.updated_at AS user_updated_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = $1 ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, u.email ASC",
+        )
+        .bind(organization_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn update_organization_membership(
+        &self,
+        organization_id: Uuid,
+        membership_id: Uuid,
+        actor_email: &str,
+        request: UpdateOrganizationMembershipRequest,
+    ) -> AppResult<MembershipRecord> {
+        request.validate()?;
+        let actor_membership = self
+            .find_membership_for_user_email(organization_id, actor_email)
+            .await?;
+        if !actor_membership.role.can_manage_memberships() {
+            return Err(AppError::Validation(
+                "only organization owners and admins can manage memberships".to_string(),
+            ));
+        }
+
+        let record = sqlx::query_as::<_, MembershipRecordRow>(
+            "SELECT m.id AS membership_id, m.organization_id AS membership_organization_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at, u.email AS user_email, u.name AS user_name, u.created_at AS user_created_at, u.updated_at AS user_updated_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = $1 AND m.id = $2",
+        )
+        .bind(organization_id.to_string())
+        .bind(membership_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "membership {membership_id} for organization {organization_id}"
+            ))
+        })?;
+        let record: MembershipRecord = record.try_into()?;
+
+        if record.membership.role == OrganizationRole::Owner {
+            return Err(AppError::Validation(
+                "owner memberships cannot be changed through this endpoint".to_string(),
+            ));
+        }
+
+        let now = Utc::now();
+        sqlx::query("UPDATE memberships SET role = $1, updated_at = $2 WHERE id = $3")
+            .bind(request.role.to_string())
+            .bind(now.to_rfc3339())
+            .bind(membership_id.to_string())
+            .execute(&self.pool)
+            .await?;
+
+        Ok(MembershipRecord {
+            membership: Membership {
+                role: request.role,
+                updated_at: now,
+                ..record.membership
+            },
+            user: record.user,
+        })
+    }
+
+    pub async fn create_account(&self, request: CreateAccountRequest) -> AppResult<Account> {
+        request.validate()?;
+        let CreateAccountRequest {
+            organization_id,
+            name,
+            create_tickets,
+            ticket_provider,
+            ticketing_api_key,
+            notification_provider,
+            notification_api_key,
+            ai_enabled,
+            use_managed_ai,
+            ai_api_key,
+            notify_min_level,
+            rapid_occurrence_window_minutes,
+            rapid_occurrence_threshold,
+        } = request;
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
+        let organization_id = match organization_id {
+            Some(organization_id) => {
+                find_organization_tx(&mut tx, organization_id).await?;
+                organization_id
+            }
+            None => {
+                let organization = Organization {
+                    id: Uuid::new_v4(),
+                    name: name.trim().to_string(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                insert_organization_tx(&mut tx, &organization).await?;
+                organization.id
+            }
+        };
+        let account = Account {
+            id: Uuid::new_v4(),
+            organization_id,
+            name,
+            create_tickets,
+            ticket_provider,
+            ticketing_api_key: normalize_optional(ticketing_api_key),
+            notification_provider,
+            notification_api_key: normalize_optional(notification_api_key),
+            ai_enabled,
+            use_managed_ai,
+            ai_api_key: normalize_optional(ai_api_key),
+            notify_min_level,
+            rapid_occurrence_window_minutes,
+            rapid_occurrence_threshold,
+        };
+        let provider_configs = build_provider_configs(&account, now);
+
         sqlx::query(
-            "INSERT INTO accounts (id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            "INSERT INTO accounts (id, organization_id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
         .bind(account.id.to_string())
+        .bind(account.organization_id.to_string())
         .bind(account.name.clone())
         .bind(account.create_tickets as i32)
         .bind(account.ticket_provider.to_string())
@@ -159,12 +364,34 @@ impl Repository {
 
     pub async fn find_account(&self, account_id: Uuid) -> AppResult<Account> {
         let row = sqlx::query_as::<_, AccountRow>(
-            "SELECT id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = $1",
+            "SELECT id, organization_id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold FROM accounts WHERE id = $1",
         )
         .bind(account_id.to_string())
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("account {account_id}")))?;
+
+        row.try_into()
+    }
+
+    pub async fn find_membership_for_user_email(
+        &self,
+        organization_id: Uuid,
+        user_email: &str,
+    ) -> AppResult<Membership> {
+        let user_email = normalize_user_email(user_email)?;
+        let row = sqlx::query_as::<_, MembershipRow>(
+            "SELECT m.id, m.organization_id, m.user_id, m.role, m.created_at, m.updated_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = $1 AND u.email = $2",
+        )
+        .bind(organization_id.to_string())
+        .bind(user_email)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "membership for user in organization {organization_id}"
+            ))
+        })?;
 
         row.try_into()
     }
@@ -770,6 +997,11 @@ fn normalize_optional(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_user_email(value: &str) -> AppResult<String> {
+    normalize_email(value)
+        .ok_or_else(|| AppError::Validation("email must be a valid email".to_string()))
+}
+
 fn build_provider_configs(account: &Account, now: DateTime<Utc>) -> Vec<AccountProviderConfig> {
     let ai_provider = if account.use_managed_ai {
         "managed"
@@ -836,6 +1068,111 @@ async fn insert_account_provider_config_tx(
     .await?;
 
     Ok(())
+}
+
+async fn insert_organization_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization: &Organization,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO organizations (id, name, created_at, updated_at) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(organization.id.to_string())
+    .bind(organization.name.clone())
+    .bind(organization.created_at.to_rfc3339())
+    .bind(organization.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_membership_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    membership: &Membership,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO memberships (id, organization_id, user_id, role, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(membership.id.to_string())
+    .bind(membership.organization_id.to_string())
+    .bind(membership.user_id.to_string())
+    .bind(membership.role.to_string())
+    .bind(membership.created_at.to_rfc3339())
+    .bind(membership.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn find_organization_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+) -> AppResult<Organization> {
+    let row = sqlx::query_as::<_, OrganizationRow>(
+        "SELECT id, name, created_at, updated_at FROM organizations WHERE id = $1",
+    )
+    .bind(organization_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("organization {organization_id}")))?;
+
+    row.try_into()
+}
+
+async fn find_or_create_user_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    email: &str,
+    name: &str,
+    now: DateTime<Utc>,
+) -> AppResult<User> {
+    if let Some(existing) = sqlx::query_as::<_, UserRow>(
+        "SELECT id, email, name, created_at, updated_at FROM users WHERE email = $1",
+    )
+    .bind(email)
+    .fetch_optional(&mut **tx)
+    .await?
+    {
+        return existing.try_into();
+    }
+
+    let user = User {
+        id: Uuid::new_v4(),
+        email: email.to_string(),
+        name: name.trim().to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+
+    sqlx::query(
+        "INSERT INTO users (id, email, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(user.id.to_string())
+    .bind(user.email.clone())
+    .bind(user.name.clone())
+    .bind(user.created_at.to_rfc3339())
+    .bind(user.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(user)
+}
+
+async fn find_membership_for_user_id_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    user_id: Uuid,
+) -> AppResult<Option<Membership>> {
+    sqlx::query_as::<_, MembershipRow>(
+        "SELECT id, organization_id, user_id, role, created_at, updated_at FROM memberships WHERE organization_id = $1 AND user_id = $2",
+    )
+    .bind(organization_id.to_string())
+    .bind(user_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?
+    .map(TryInto::try_into)
+    .transpose()
 }
 
 async fn insert_ticket_comment_tx(
@@ -908,6 +1245,7 @@ fn parse_rfc3339_utc(value: &str) -> AppResult<DateTime<Utc>> {
 #[derive(Debug, FromRow)]
 struct AccountRow {
     id: String,
+    organization_id: String,
     name: String,
     create_tickets: i32,
     ticket_provider: String,
@@ -928,6 +1266,7 @@ impl TryFrom<AccountRow> for Account {
     fn try_from(row: AccountRow) -> Result<Self, Self::Error> {
         Ok(Self {
             id: Uuid::parse_str(&row.id)?,
+            organization_id: Uuid::parse_str(&row.organization_id)?,
             name: row.name,
             create_tickets: row.create_tickets != 0,
             ticket_provider: TicketProvider::from_str(&row.ticket_provider)?,
@@ -940,6 +1279,149 @@ impl TryFrom<AccountRow> for Account {
             notify_min_level: Severity::from_str(&row.notify_min_level)?,
             rapid_occurrence_window_minutes: row.rapid_occurrence_window_minutes as i64,
             rapid_occurrence_threshold: row.rapid_occurrence_threshold as i64,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct OrganizationRow {
+    id: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<OrganizationRow> for Organization {
+    type Error = AppError;
+
+    fn try_from(row: OrganizationRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            name: row.name,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct UserRow {
+    id: String,
+    email: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<UserRow> for User {
+    type Error = AppError;
+
+    fn try_from(row: UserRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            email: row.email,
+            name: row.name,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct MembershipRow {
+    id: String,
+    organization_id: String,
+    user_id: String,
+    role: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<MembershipRow> for Membership {
+    type Error = AppError;
+
+    fn try_from(row: MembershipRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            organization_id: Uuid::parse_str(&row.organization_id)?,
+            user_id: Uuid::parse_str(&row.user_id)?,
+            role: OrganizationRole::from_str(&row.role)?,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct OrganizationAccessRow {
+    organization_id: String,
+    organization_name: String,
+    organization_created_at: String,
+    organization_updated_at: String,
+    membership_id: String,
+    membership_user_id: String,
+    membership_role: String,
+    membership_created_at: String,
+    membership_updated_at: String,
+}
+
+impl TryFrom<OrganizationAccessRow> for OrganizationAccess {
+    type Error = AppError;
+
+    fn try_from(row: OrganizationAccessRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            organization: Organization {
+                id: Uuid::parse_str(&row.organization_id)?,
+                name: row.organization_name,
+                created_at: parse_rfc3339_utc(&row.organization_created_at)?,
+                updated_at: parse_rfc3339_utc(&row.organization_updated_at)?,
+            },
+            membership: Membership {
+                id: Uuid::parse_str(&row.membership_id)?,
+                organization_id: Uuid::parse_str(&row.organization_id)?,
+                user_id: Uuid::parse_str(&row.membership_user_id)?,
+                role: OrganizationRole::from_str(&row.membership_role)?,
+                created_at: parse_rfc3339_utc(&row.membership_created_at)?,
+                updated_at: parse_rfc3339_utc(&row.membership_updated_at)?,
+            },
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct MembershipRecordRow {
+    membership_id: String,
+    membership_organization_id: String,
+    membership_user_id: String,
+    membership_role: String,
+    membership_created_at: String,
+    membership_updated_at: String,
+    user_email: String,
+    user_name: String,
+    user_created_at: String,
+    user_updated_at: String,
+}
+
+impl TryFrom<MembershipRecordRow> for MembershipRecord {
+    type Error = AppError;
+
+    fn try_from(row: MembershipRecordRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            membership: Membership {
+                id: Uuid::parse_str(&row.membership_id)?,
+                organization_id: Uuid::parse_str(&row.membership_organization_id)?,
+                user_id: Uuid::parse_str(&row.membership_user_id)?,
+                role: OrganizationRole::from_str(&row.membership_role)?,
+                created_at: parse_rfc3339_utc(&row.membership_created_at)?,
+                updated_at: parse_rfc3339_utc(&row.membership_updated_at)?,
+            },
+            user: User {
+                id: Uuid::parse_str(&row.membership_user_id)?,
+                email: row.user_email,
+                name: row.user_name,
+                created_at: parse_rfc3339_utc(&row.user_created_at)?,
+                updated_at: parse_rfc3339_utc(&row.user_updated_at)?,
+            },
         })
     }
 }

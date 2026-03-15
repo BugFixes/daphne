@@ -1,3 +1,4 @@
+use axum::http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
 use crate::domain::{
@@ -5,7 +6,10 @@ use crate::domain::{
     StacktraceEventPayload,
 };
 
-use super::{AgentAuth, decode_go_bytes, format_location, map_go_bug_payload, map_go_log_payload};
+use super::{
+    AgentAuth, decode_go_bytes, extract_current_user_email, format_location, map_go_bug_payload,
+    map_go_log_payload,
+};
 
 #[test]
 fn decodes_go_log_stack_and_headers_into_event() {
@@ -203,4 +207,27 @@ fn preserves_canonical_log_payload_fields() {
     assert_eq!(event.agent_secret.as_deref(), Some("secret"));
     assert_eq!(event.message, "db timeout");
     assert_eq!(event.stacktrace.as_deref(), Some("frame_one"));
+}
+
+#[test]
+fn extracts_current_user_email_header() {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "X-User-Email",
+        HeaderValue::from_static("owner@example.com"),
+    );
+
+    let email = extract_current_user_email(&headers).expect("email");
+
+    assert_eq!(email, "owner@example.com");
+}
+
+#[test]
+fn requires_current_user_email_header() {
+    let error = extract_current_user_email(&HeaderMap::new()).expect_err("missing header");
+
+    assert_eq!(
+        error.to_string(),
+        "validation failed: missing X-User-Email header"
+    );
 }

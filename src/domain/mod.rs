@@ -167,6 +167,46 @@ impl FromStr for AccountProviderKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationRole {
+    Owner,
+    Admin,
+    Member,
+}
+
+impl OrganizationRole {
+    pub fn can_manage_memberships(self) -> bool {
+        matches!(self, Self::Owner | Self::Admin)
+    }
+}
+
+impl fmt::Display for OrganizationRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Owner => "owner",
+            Self::Admin => "admin",
+            Self::Member => "member",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for OrganizationRole {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "owner" => Ok(Self::Owner),
+            "admin" => Ok(Self::Admin),
+            "member" => Ok(Self::Member),
+            _ => Err(AppError::Validation(format!(
+                "unsupported organization role: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketPriority {
@@ -233,8 +273,48 @@ impl FromStr for TicketPriority {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Organization {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct User {
+    pub id: Uuid,
+    pub email: String,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Membership {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub user_id: Uuid,
+    pub role: OrganizationRole,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizationAccess {
+    pub organization: Organization,
+    pub membership: Membership,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MembershipRecord {
+    pub membership: Membership,
+    pub user: User,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Account {
     pub id: Uuid,
+    pub organization_id: Uuid,
     pub name: String,
     pub create_tickets: bool,
     pub ticket_provider: TicketProvider,
@@ -355,6 +435,8 @@ pub struct LogArchive {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAccountRequest {
+    #[serde(default)]
+    pub organization_id: Option<Uuid>,
     pub name: String,
     pub create_tickets: bool,
     pub ticket_provider: TicketProvider,
@@ -400,6 +482,76 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateOrganizationRequest {
+    pub name: String,
+    pub owner_email: String,
+    pub owner_name: String,
+}
+
+impl CreateOrganizationRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "organization name cannot be empty".to_string(),
+            ));
+        }
+        if normalize_email(&self.owner_email).is_none() {
+            return Err(AppError::Validation(
+                "owner_email must be a valid email".to_string(),
+            ));
+        }
+        if self.owner_name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "owner_name cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AddOrganizationMemberRequest {
+    pub email: String,
+    pub name: String,
+    pub role: OrganizationRole,
+}
+
+impl AddOrganizationMemberRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if normalize_email(&self.email).is_none() {
+            return Err(AppError::Validation(
+                "email must be a valid email".to_string(),
+            ));
+        }
+        if self.name.trim().is_empty() {
+            return Err(AppError::Validation("name cannot be empty".to_string()));
+        }
+        if self.role == OrganizationRole::Owner {
+            return Err(AppError::Validation(
+                "members can only be added as admin or member".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateOrganizationMembershipRequest {
+    pub role: OrganizationRole,
+}
+
+impl UpdateOrganizationMembershipRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.role == OrganizationRole::Owner {
+            return Err(AppError::Validation(
+                "owner role cannot be assigned through membership updates".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAgentRequest {
     pub account_id: Uuid,
     pub name: String,
@@ -414,6 +566,15 @@ impl CreateAgentRequest {
         }
         Ok(())
     }
+}
+
+pub fn normalize_email(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() || !normalized.contains('@') {
+        return None;
+    }
+
+    Some(normalized)
 }
 
 /// Canonical stacktrace-first event used by the intake service.

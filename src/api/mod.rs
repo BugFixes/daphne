@@ -2,9 +2,9 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path, State},
     http::HeaderMap,
-    routing::{get, post},
+    routing::{get, patch, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
@@ -13,9 +13,10 @@ use serde_json::Value;
 use crate::{
     AppError, AppResult,
     domain::{
-        AuthenticatedStacktraceEventPayload, CreateAccountRequest, CreateAgentRequest,
-        GoBugPayload, GoLogPayload, LogEvent, LogEventPayload, Severity, StacktraceEvent,
-        StacktraceEventPayload,
+        AddOrganizationMemberRequest, AuthenticatedStacktraceEventPayload, CreateAccountRequest,
+        CreateAgentRequest, CreateOrganizationRequest, GoBugPayload, GoLogPayload, LogEvent,
+        LogEventPayload, Severity, StacktraceEvent, StacktraceEventPayload,
+        UpdateOrganizationMembershipRequest,
     },
     repository::Repository,
     service::IntakeService,
@@ -30,6 +31,18 @@ pub struct AppState {
 pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route(
+            "/v1/organizations",
+            post(create_organization).get(list_organizations),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/memberships",
+            post(add_organization_member).get(list_organization_memberships),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/memberships/{membership_id}",
+            patch(update_organization_membership),
+        )
         .route("/v1/accounts", post(create_account))
         .route("/v1/agents", post(create_agent))
         .route("/v1/events/stacktraces", post(ingest_stacktrace))
@@ -48,6 +61,67 @@ pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -
 
 async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { ok: true })
+}
+
+async fn create_organization(
+    State(state): State<AppState>,
+    Json(request): Json<CreateOrganizationRequest>,
+) -> AppResult<Json<crate::domain::OrganizationAccess>> {
+    let organization = state.repository.create_organization(request).await?;
+    Ok(Json(organization))
+}
+
+async fn list_organizations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<crate::domain::OrganizationAccess>>> {
+    let user_email = extract_current_user_email(&headers)?;
+    let organizations = state
+        .repository
+        .list_organizations_for_user(&user_email)
+        .await?;
+    Ok(Json(organizations))
+}
+
+async fn add_organization_member(
+    State(state): State<AppState>,
+    Path(organization_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<AddOrganizationMemberRequest>,
+) -> AppResult<Json<crate::domain::MembershipRecord>> {
+    let user_email = extract_current_user_email(&headers)?;
+    let membership = state
+        .repository
+        .add_organization_member(organization_id, &user_email, request)
+        .await?;
+    Ok(Json(membership))
+}
+
+async fn list_organization_memberships(
+    State(state): State<AppState>,
+    Path(organization_id): Path<uuid::Uuid>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<crate::domain::MembershipRecord>>> {
+    let user_email = extract_current_user_email(&headers)?;
+    let memberships = state
+        .repository
+        .list_organization_memberships(organization_id, &user_email)
+        .await?;
+    Ok(Json(memberships))
+}
+
+async fn update_organization_membership(
+    State(state): State<AppState>,
+    Path((organization_id, membership_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<UpdateOrganizationMembershipRequest>,
+) -> AppResult<Json<crate::domain::MembershipRecord>> {
+    let user_email = extract_current_user_email(&headers)?;
+    let membership = state
+        .repository
+        .update_organization_membership(organization_id, membership_id, &user_email, request)
+        .await?;
+    Ok(Json(membership))
 }
 
 async fn create_account(
@@ -223,6 +297,15 @@ fn extract_agent_auth(headers: &HeaderMap) -> AppResult<AgentAuth> {
         key: key.to_string(),
         secret: secret.to_string(),
     })
+}
+
+fn extract_current_user_email(headers: &HeaderMap) -> AppResult<String> {
+    headers
+        .get("X-User-Email")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::Validation("missing X-User-Email header".to_string()))
 }
 
 fn parse_level(value: &str) -> AppResult<Severity> {

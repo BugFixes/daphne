@@ -35,7 +35,7 @@ pub(crate) async fn reset_database() {
         .expect("test database pool");
 
     sqlx::query(
-        "TRUNCATE TABLE log_archives, logs, ticket_events, notification_events, account_provider_configs, ticket_comments, tickets, notifications, occurrences, bugs, agents, accounts RESTART IDENTITY CASCADE",
+        "TRUNCATE TABLE log_archives, logs, ticket_events, notification_events, account_provider_configs, ticket_comments, tickets, notifications, occurrences, bugs, agents, memberships, users, accounts, organizations RESTART IDENTITY CASCADE",
     )
     .execute(&pool)
     .await
