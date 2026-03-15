@@ -1,6 +1,9 @@
 use serde_json::json;
 
-use crate::domain::{GoBugPayload, GoLogPayload, Severity, StacktraceEventPayload};
+use crate::domain::{
+    AuthenticatedStacktraceEventPayload, GoBugPayload, GoLogPayload, LogEventPayload, Severity,
+    StacktraceEventPayload,
+};
 
 use super::{AgentAuth, decode_go_bytes, format_location, map_go_bug_payload, map_go_log_payload};
 
@@ -27,8 +30,8 @@ fn decodes_go_log_stack_and_headers_into_event() {
 
     assert_eq!(event.agent_secret.as_deref(), Some("secret"));
     assert_eq!(event.level, Severity::Error);
-    assert!(event.stacktrace.contains("main.go:42"));
-    assert!(event.stacktrace.contains("goroutine 1 [running]"));
+    assert_eq!(event.message, "panic happened");
+    assert!(event.stacktrace.expect("stacktrace").contains("main.go:42"));
 }
 
 #[test]
@@ -94,9 +97,10 @@ fn accepts_rust_log_payload_shape() {
     .expect("event");
 
     assert_eq!(event.level, Severity::Error);
-    assert!(event.stacktrace.contains("src/main.rs:27"));
-    assert!(event.stacktrace.contains("app::worker::run"));
-    assert!(event.stacktrace.contains("/workspace/src/worker.rs:42:7"));
+    let stacktrace = event.stacktrace.expect("stacktrace");
+    assert!(stacktrace.contains("src/main.rs:27"));
+    assert!(stacktrace.contains("app::worker::run"));
+    assert!(stacktrace.contains("/workspace/src/worker.rs:42:7"));
 }
 
 #[test]
@@ -152,4 +156,51 @@ fn preserves_canonical_stacktrace_payload_fields() {
         event.attributes.get("source").map(String::as_str),
         Some("stacktrace_api")
     );
+}
+
+#[test]
+fn preserves_authenticated_stacktrace_payload_fields() {
+    let payload = AuthenticatedStacktraceEventPayload {
+        language: "rust".to_string(),
+        stacktrace: "panic: test".to_string(),
+        level: Severity::Error,
+        occurred_at: None,
+        service: Some("api".to_string()),
+        environment: Some("prod".to_string()),
+        attributes: std::collections::HashMap::from([(
+            "source".to_string(),
+            "header_stacktrace_api".to_string(),
+        )]),
+    };
+
+    let event = payload.into_stacktrace_event("key".to_string(), "secret".to_string());
+
+    assert_eq!(event.agent_key, "key");
+    assert_eq!(event.agent_secret.as_deref(), Some("secret"));
+    assert_eq!(event.service.as_deref(), Some("api"));
+    assert_eq!(event.environment.as_deref(), Some("prod"));
+}
+
+#[test]
+fn preserves_canonical_log_payload_fields() {
+    let payload = LogEventPayload {
+        language: "rust".to_string(),
+        message: "db timeout".to_string(),
+        stacktrace: Some("frame_one".to_string()),
+        level: Severity::Warn,
+        occurred_at: None,
+        service: Some("api".to_string()),
+        environment: Some("prod".to_string()),
+        attributes: std::collections::HashMap::from([(
+            "source".to_string(),
+            "log_api".to_string(),
+        )]),
+    };
+
+    let event = payload.into_log_event("key".to_string(), "secret".to_string());
+
+    assert_eq!(event.agent_key, "key");
+    assert_eq!(event.agent_secret.as_deref(), Some("secret"));
+    assert_eq!(event.message, "db timeout");
+    assert_eq!(event.stacktrace.as_deref(), Some("frame_one"));
 }

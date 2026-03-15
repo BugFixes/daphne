@@ -5,7 +5,9 @@
 - create a ticket when the account is configured to do so
 - generate an AI recommendation alongside the ticket
 - notify users only when the account severity threshold says it should
+- suppress repeat notifications inside a configurable cooldown window
 - escalate or comment on the existing ticket when the bug repeats
+- store non-bug logs separately and periodically archive/trim old log volume
 
 Ticketing, notification, and AI execution are policy-gated from raw account context. The service sends the chosen provider or advisor, whether that integration is enabled, and any configured credential to the policy engine, and the policy decides whether the action is allowed.
 
@@ -15,9 +17,12 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 
 - `POST /v1/accounts` creates an account with ticketing and notification policy.
 - `POST /v1/agents` creates an agent and returns its `api_key` and `api_secret`.
-- `POST /v1/log` accepts raw `go-bugfixes/logs` and `bugfixes-rs` log payloads, then maps them into canonical stacktrace events.
+- `POST /v1/log` accepts raw `go-bugfixes/logs` and `bugfixes-rs` log payloads and stores them in the log stream.
 - `POST /v1/bug` accepts raw `go-bugfixes/middleware` and `bugfixes-rs` panic payloads, then maps them into canonical stacktrace events.
 - `POST /v1/events/stacktraces` accepts the canonical stacktrace event payload directly.
+- `POST /v1/events/bugs` accepts the canonical bug payload with `X-API-KEY` and `X-API-SECRET` headers.
+- `POST /v1/events/logs` accepts the canonical log payload with `X-API-KEY` and `X-API-SECRET` headers.
+- `POST /v1/logs/retention/run` summarizes and deletes logs older than the configured retention window.
 - `GET /healthz` returns a basic health response.
 
 The current providers are local stubs for:
@@ -62,6 +67,8 @@ Environment variables:
 - `BUGFIXES_FEATURE_FLAGS_PROVIDER` default: `local`
 - `BUGFIXES_POLICY_PROVIDER` default: `local`
 - `BUGFIXES_POLICY2_ENGINE_URL` default: `https://api.policy2.net/run`
+- `BUGFIXES_NOTIFICATION_COOLDOWN_MINUTES` default: `0` (disabled)
+- `BUGFIXES_LOG_RETENTION_DAYS` default: `30`
 - `BUGFIXES_DISABLED_FEATURES` optional comma-separated local disable list
 - `BUGFIXES_FLAGSGG_PROJECT_ID` optional when using `flagsgg`
 - `BUGFIXES_FLAGSGG_AGENT_ID` optional when using `flagsgg`
@@ -169,6 +176,12 @@ curl -X POST http://127.0.0.1:3000/v1/bug \
 
 `../bugfixes-rs` currently targets the same `POST /log` and `POST /bug` contract with the same `X-API-KEY` and `X-API-SECRET` headers, so the Rust agent can use this service without a separate intake path.
 
+Run log retention manually:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/logs/retention/run
+```
+
 The intake model is stacktrace-first:
 
 - raw agent and API payloads describe what was observed at the edge
@@ -210,9 +223,16 @@ Current bug record semantics that are easy to miss:
 - `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`.
 - `bugs` are deduplicated by `account_id + stacktrace_hash`.
 - `occurrences` store each event, including `service`, `environment`, and free-form attributes, so rapid-repeat detection and future drill-down screens can use the original context.
+- `logs` stores non-bug log events separately from the deduplicated bug model.
+- `log_archives` stores low-cardinality retention summaries before old logs are trimmed.
 - `tickets` store the external issue reference plus AI recommendation and current priority.
 - `ticket_events` records ticket creation, comments, and escalations alongside the existing `ticket_comments` text history.
 - `notification_events` records both sent and skipped notification decisions, while `notifications` keeps the sent-message audit trail.
+
+Notification behavior that changed with this foundation:
+
+- bug notifications are still policy-gated by severity and ticket action
+- when `BUGFIXES_NOTIFICATION_COOLDOWN_MINUTES` is greater than `0`, the service suppresses another notification for the same bug and provider until that window expires
 
 ## Feature Flags
 

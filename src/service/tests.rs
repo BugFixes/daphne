@@ -6,8 +6,9 @@ use serial_test::serial;
 use crate::{
     ai::AiRegistry,
     domain::{
-        CreateAccountRequest, CreateAgentRequest, NotificationEventStatus, NotificationProvider,
-        Severity, StacktraceEvent, TicketAction, TicketPriority, TicketProvider,
+        CreateAccountRequest, CreateAgentRequest, LogEvent, NotificationEventStatus,
+        NotificationProvider, Severity, StacktraceEvent, TicketAction, TicketPriority,
+        TicketProvider,
     },
     feature_flags::build_feature_flags,
     notifications::NotificationRegistry,
@@ -17,7 +18,7 @@ use crate::{
     ticketing::TicketingRegistry,
 };
 
-use super::IntakeService;
+use super::{IntakeService, IntakeServiceSettings};
 
 async fn test_service() -> IntakeService {
     test_service_with_disabled_features(HashSet::new()).await
@@ -39,6 +40,33 @@ async fn test_service_with_disabled_features(disabled_features: HashSet<String>)
         ai,
         feature_flags,
         policy_engine,
+        IntakeServiceSettings {
+            notification_cooldown_minutes: config.notification_cooldown_minutes,
+            log_retention_days: config.log_retention_days,
+        },
+    )
+}
+
+async fn test_service_with_cooldown(notification_cooldown_minutes: i64) -> IntakeService {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Arc::new(Repository::connect(&config).await.expect("repository"));
+    reset_database().await;
+    let ticketing = Arc::new(TicketingRegistry::default());
+    let notifications = Arc::new(NotificationRegistry::default());
+    let ai = Arc::new(AiRegistry::default());
+    let feature_flags = build_feature_flags(&config).expect("feature flags");
+    let policy_engine = build_policy_engine(&config).expect("policy engine");
+    IntakeService::new(
+        repository,
+        ticketing,
+        notifications,
+        ai,
+        feature_flags,
+        policy_engine,
+        IntakeServiceSettings {
+            notification_cooldown_minutes,
+            log_retention_days: config.log_retention_days,
+        },
     )
 }
 
@@ -892,4 +920,243 @@ async fn deduplicates_go_stacktraces_with_different_goroutine_ids() {
     assert!(first.is_new_bug);
     assert!(!second.is_new_bug);
     assert_eq!(first.stacktrace_hash, second.stacktrace_hash);
+}
+
+#[tokio::test]
+#[serial]
+async fn stores_logs_without_creating_bug_records() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Nu".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::Github,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Fatal,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+
+    let outcome = service
+        .ingest_log(LogEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            message: "db timeout".to_string(),
+            stacktrace: Some("frame_one".to_string()),
+            level: Severity::Error,
+            occurred_at: Some(Utc::now()),
+            service: Some("api".to_string()),
+            environment: Some("prod".to_string()),
+            attributes: std::collections::HashMap::from([(
+                "source".to_string(),
+                "agent_log".to_string(),
+            )]),
+        })
+        .await
+        .expect("ingest log");
+
+    assert!(outcome.stored);
+
+    let logs = service
+        .repository
+        .list_logs_for_account(account.id)
+        .await
+        .expect("logs");
+
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].message, "db timeout");
+    assert_eq!(logs[0].stacktrace.as_deref(), Some("frame_one"));
+    assert_eq!(logs[0].service.as_deref(), Some("api"));
+
+    let bug = service
+        .repository
+        .find_bug_by_hash(account.id, "non-existent")
+        .await
+        .expect("bug lookup");
+    assert!(bug.is_none());
+}
+
+#[tokio::test]
+#[serial]
+async fn archives_and_trims_logs_older_than_retention_window() {
+    let service = test_service().await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Xi".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::Github,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Fatal,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let now = Utc::now();
+
+    service
+        .ingest_log(LogEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "rust".to_string(),
+            message: "old log".to_string(),
+            stacktrace: None,
+            level: Severity::Warn,
+            occurred_at: Some(now - chrono::Duration::days(31)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("old log");
+    service
+        .ingest_log(LogEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            message: "fresh log".to_string(),
+            stacktrace: None,
+            level: Severity::Warn,
+            occurred_at: Some(now - chrono::Duration::days(1)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("fresh log");
+
+    let outcome = service
+        .run_log_retention(now)
+        .await
+        .expect("retention outcome");
+
+    assert_eq!(outcome.archived_batches, 1);
+    assert_eq!(outcome.archived_logs, 1);
+    assert_eq!(outcome.deleted_logs, 1);
+
+    let logs = service
+        .repository
+        .list_logs_for_account(account.id)
+        .await
+        .expect("logs");
+    let archives = service
+        .repository
+        .list_log_archives()
+        .await
+        .expect("archives");
+
+    assert_eq!(logs.len(), 1);
+    assert_eq!(logs[0].message, "fresh log");
+    assert_eq!(archives.len(), 1);
+    assert_eq!(archives[0].log_count, 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn suppresses_repeat_notifications_inside_cooldown_window() {
+    let service = test_service_with_cooldown(60).await;
+    let account = service
+        .repository
+        .create_account(CreateAccountRequest {
+            name: "Omicron".to_string(),
+            create_tickets: true,
+            ticket_provider: TicketProvider::Jira,
+            ticketing_api_key: Some("jira_test_key".to_string()),
+            notification_provider: NotificationProvider::Slack,
+            notification_api_key: Some("slack_test_key".to_string()),
+            ai_enabled: true,
+            use_managed_ai: true,
+            ai_api_key: None,
+            notify_min_level: Severity::Warn,
+            rapid_occurrence_window_minutes: 60,
+            rapid_occurrence_threshold: 2,
+        })
+        .await
+        .expect("account");
+    let agent = service
+        .repository
+        .create_agent(CreateAgentRequest {
+            account_id: account.id,
+            name: "worker".to_string(),
+        })
+        .await
+        .expect("agent");
+    let now = Utc::now();
+
+    let first = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key.clone(),
+            agent_secret: Some(agent.api_secret.clone()),
+            language: "rust".to_string(),
+            stacktrace: "panic: retry storm".to_string(),
+            level: Severity::Error,
+            occurred_at: Some(now),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("first ingest");
+    let second = service
+        .ingest(StacktraceEvent {
+            agent_key: agent.api_key,
+            agent_secret: Some(agent.api_secret),
+            language: "rust".to_string(),
+            stacktrace: "panic: retry storm".to_string(),
+            level: Severity::Error,
+            occurred_at: Some(now + chrono::Duration::minutes(10)),
+            service: None,
+            environment: None,
+            attributes: Default::default(),
+        })
+        .await
+        .expect("second ingest");
+
+    assert!(first.notification.sent);
+    assert_eq!(second.ticket_action, TicketAction::Escalated);
+    assert!(!second.notification.sent);
+
+    let notification_events = service
+        .repository
+        .list_notification_events_for_bug(first.bug_id)
+        .await
+        .expect("notification events");
+
+    assert_eq!(notification_events.len(), 2);
+    assert_eq!(
+        notification_events[1].status,
+        NotificationEventStatus::Skipped
+    );
+    assert_eq!(notification_events[1].reason, "cooldown_active");
 }

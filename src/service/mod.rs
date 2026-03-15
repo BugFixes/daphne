@@ -36,6 +36,14 @@ pub struct IntakeService {
     ai: Arc<AiRegistry>,
     feature_flags: Arc<dyn FeatureFlagsClient>,
     policy_engine: Arc<dyn PolicyEngine>,
+    notification_cooldown_minutes: i64,
+    log_retention_days: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IntakeServiceSettings {
+    pub notification_cooldown_minutes: i64,
+    pub log_retention_days: i64,
 }
 
 impl IntakeService {
@@ -46,6 +54,7 @@ impl IntakeService {
         ai: Arc<AiRegistry>,
         feature_flags: Arc<dyn FeatureFlagsClient>,
         policy_engine: Arc<dyn PolicyEngine>,
+        settings: IntakeServiceSettings,
     ) -> Self {
         Self {
             repository,
@@ -54,6 +63,8 @@ impl IntakeService {
             ai,
             feature_flags,
             policy_engine,
+            notification_cooldown_minutes: settings.notification_cooldown_minutes,
+            log_retention_days: settings.log_retention_days,
         }
     }
 
@@ -98,6 +109,54 @@ impl IntakeService {
             )
             .await
         }
+    }
+
+    pub async fn ingest_log(
+        &self,
+        event: crate::domain::LogEvent,
+    ) -> AppResult<crate::domain::LogIntakeOutcome> {
+        event.validate()?;
+
+        let agent = match event.agent_secret.as_deref() {
+            Some(agent_secret) => {
+                self.repository
+                    .find_agent_by_credentials(&event.agent_key, agent_secret)
+                    .await?
+            }
+            None => self.repository.find_agent_by_key(&event.agent_key).await?,
+        };
+        let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
+        let log = self
+            .repository
+            .create_log(crate::repository::CreateLogRecord {
+                account_id: agent.account_id,
+                agent_id: agent.id,
+                language: &event.language,
+                level: event.level,
+                message: &event.message,
+                stacktrace: event.stacktrace.as_deref(),
+                occurred_at,
+                service: event.service.as_deref(),
+                environment: event.environment.as_deref(),
+                attributes: &event.attributes,
+            })
+            .await?;
+
+        Ok(crate::domain::LogIntakeOutcome {
+            log_id: log.id,
+            stored: true,
+            retention_days: self.log_retention_days,
+        })
+    }
+
+    pub async fn run_log_retention(
+        &self,
+        now: DateTime<Utc>,
+    ) -> AppResult<crate::domain::LogRetentionOutcome> {
+        let cutoff_before = now - chrono::Duration::days(self.log_retention_days);
+        self.repository
+            .archive_logs_before(cutoff_before, now)
+            .await
     }
 
     async fn handle_new_bug(
@@ -441,6 +500,33 @@ impl IntakeService {
                     level,
                     ticket_action,
                     "policy_denied",
+                    occurred_at,
+                )
+                .await?;
+            return Ok(NotificationOutcome {
+                sent: false,
+                provider: None,
+                message: None,
+            });
+        }
+        if self.notification_cooldown_minutes > 0
+            && self
+                .repository
+                .find_latest_notification_for_bug(bug.id, account.notification_provider)
+                .await?
+                .is_some_and(|notification| {
+                    notification.sent_at
+                        + chrono::Duration::minutes(self.notification_cooldown_minutes)
+                        > occurred_at
+                })
+        {
+            self.repository
+                .record_notification_skip(
+                    bug.id,
+                    account.notification_provider,
+                    level,
+                    ticket_action,
+                    "cooldown_active",
                     occurred_at,
                 )
                 .await?;

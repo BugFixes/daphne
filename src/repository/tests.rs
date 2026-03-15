@@ -21,7 +21,7 @@ async fn connects_to_postgres_after_running_migrations() {
         .await
         .expect("migration count");
 
-    assert!(migration_count >= 3);
+    assert!(migration_count >= 4);
 }
 
 #[tokio::test]

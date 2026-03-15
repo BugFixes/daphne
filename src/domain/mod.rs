@@ -329,6 +329,31 @@ pub struct NotificationRecord {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRecord {
+    pub id: Uuid,
+    pub account_id: Uuid,
+    pub agent_id: Uuid,
+    pub language: String,
+    pub level: Severity,
+    pub message: String,
+    pub stacktrace: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    pub attributes: HashMap<String, String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogArchive {
+    pub id: Uuid,
+    pub cutoff_before: DateTime<Utc>,
+    pub log_count: i64,
+    pub summary: Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateAccountRequest {
     pub name: String,
     pub create_tickets: bool,
@@ -465,6 +490,35 @@ impl StacktraceEventPayload {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AuthenticatedStacktraceEventPayload {
+    pub language: String,
+    pub stacktrace: String,
+    #[serde(default)]
+    pub level: Severity,
+    pub occurred_at: Option<DateTime<Utc>>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub attributes: HashMap<String, String>,
+}
+
+impl AuthenticatedStacktraceEventPayload {
+    pub fn into_stacktrace_event(self, agent_key: String, agent_secret: String) -> StacktraceEvent {
+        StacktraceEvent {
+            agent_key,
+            agent_secret: Some(agent_secret),
+            language: self.language,
+            stacktrace: self.stacktrace,
+            level: self.level,
+            occurred_at: self.occurred_at,
+            service: self.service,
+            environment: self.environment,
+            attributes: self.attributes,
+        }
+    }
+}
+
 /// Raw log payload emitted by `go-bugfixes/logs` and compatible agents.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GoLogPayload {
@@ -475,6 +529,70 @@ pub struct GoLogPayload {
     pub line_number: Option<i64>,
     pub log_fmt: Option<String>,
     pub stack: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LogEvent {
+    pub agent_key: String,
+    pub agent_secret: Option<String>,
+    pub language: String,
+    pub message: String,
+    pub stacktrace: Option<String>,
+    #[serde(default)]
+    pub level: Severity,
+    pub occurred_at: Option<DateTime<Utc>>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub attributes: HashMap<String, String>,
+}
+
+impl LogEvent {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.agent_key.trim().is_empty() {
+            return Err(AppError::Validation(
+                "agent_key cannot be empty".to_string(),
+            ));
+        }
+        if self.language.trim().is_empty() {
+            return Err(AppError::Validation("language cannot be empty".to_string()));
+        }
+        if self.message.trim().is_empty() {
+            return Err(AppError::Validation("message cannot be empty".to_string()));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LogEventPayload {
+    pub language: String,
+    pub message: String,
+    pub stacktrace: Option<String>,
+    #[serde(default)]
+    pub level: Severity,
+    pub occurred_at: Option<DateTime<Utc>>,
+    pub service: Option<String>,
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub attributes: HashMap<String, String>,
+}
+
+impl LogEventPayload {
+    pub fn into_log_event(self, agent_key: String, agent_secret: String) -> LogEvent {
+        LogEvent {
+            agent_key,
+            agent_secret: Some(agent_secret),
+            language: self.language,
+            message: self.message,
+            stacktrace: self.stacktrace,
+            level: self.level,
+            occurred_at: self.occurred_at,
+            service: self.service,
+            environment: self.environment,
+            attributes: self.attributes,
+        }
+    }
 }
 
 /// Raw panic payload emitted by `go-bugfixes/middleware` and compatible agents.
@@ -607,6 +725,20 @@ pub struct NotificationOutcome {
     pub sent: bool,
     pub provider: Option<NotificationProvider>,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogIntakeOutcome {
+    pub log_id: Uuid,
+    pub stored: bool,
+    pub retention_days: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogRetentionOutcome {
+    pub archived_batches: i64,
+    pub archived_logs: i64,
+    pub deleted_logs: i64,
 }
 
 /// Summary returned after ingesting an event into the bug and occurrence model.
