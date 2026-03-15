@@ -10,9 +10,9 @@ use crate::{
     config::Config,
     domain::{
         Account, AccountProviderConfig, AccountProviderKind, Agent, Bug, CreateAccountRequest,
-        CreateAgentRequest, NotificationEvent, NotificationEventStatus, NotificationProvider,
-        NotificationRecord, Occurrence, Severity, Ticket, TicketAction, TicketEvent,
-        TicketPriority, TicketProvider,
+        CreateAgentRequest, LogArchive, LogRecord, NotificationEvent, NotificationEventStatus,
+        NotificationProvider, NotificationRecord, Occurrence, Severity, Ticket, TicketAction,
+        TicketEvent, TicketPriority, TicketProvider,
     },
     migrations,
 };
@@ -51,6 +51,19 @@ pub struct RecordOccurrence<'a> {
     pub bug_id: Uuid,
     pub severity: Severity,
     pub stacktrace: &'a str,
+    pub occurred_at: DateTime<Utc>,
+    pub service: Option<&'a str>,
+    pub environment: Option<&'a str>,
+    pub attributes: &'a HashMap<String, String>,
+}
+
+pub struct CreateLogRecord<'a> {
+    pub account_id: Uuid,
+    pub agent_id: Uuid,
+    pub language: &'a str,
+    pub level: Severity,
+    pub message: &'a str,
+    pub stacktrace: Option<&'a str>,
     pub occurred_at: DateTime<Utc>,
     pub service: Option<&'a str>,
     pub environment: Option<&'a str>,
@@ -285,6 +298,150 @@ impl Repository {
             "SELECT id, bug_id, severity, stacktrace, occurred_at, service, environment, attributes_json FROM occurrences WHERE bug_id = $1 ORDER BY occurred_at ASC",
         )
         .bind(bug_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn create_log(&self, record: CreateLogRecord<'_>) -> AppResult<LogRecord> {
+        let log = LogRecord {
+            id: Uuid::new_v4(),
+            account_id: record.account_id,
+            agent_id: record.agent_id,
+            language: record.language.to_string(),
+            level: record.level,
+            message: record.message.to_string(),
+            stacktrace: record.stacktrace.map(str::to_string),
+            occurred_at: record.occurred_at,
+            service: record.service.map(str::to_string),
+            environment: record.environment.map(str::to_string),
+            attributes: record.attributes.clone(),
+            created_at: Utc::now(),
+        };
+
+        sqlx::query(
+            "INSERT INTO logs (id, account_id, agent_id, language, level, message, stacktrace, occurred_at, service, environment, attributes_json, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        )
+        .bind(log.id.to_string())
+        .bind(log.account_id.to_string())
+        .bind(log.agent_id.to_string())
+        .bind(log.language.clone())
+        .bind(log.level.to_string())
+        .bind(log.message.clone())
+        .bind(log.stacktrace.clone())
+        .bind(log.occurred_at.to_rfc3339())
+        .bind(log.service.clone())
+        .bind(log.environment.clone())
+        .bind(serde_json::to_string(&log.attributes)?)
+        .bind(log.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(log)
+    }
+
+    pub async fn list_logs_for_account(&self, account_id: Uuid) -> AppResult<Vec<LogRecord>> {
+        sqlx::query_as::<_, LogRecordRow>(
+            "SELECT id, account_id, agent_id, language, level, message, stacktrace, occurred_at, service, environment, attributes_json, created_at FROM logs WHERE account_id = $1 ORDER BY occurred_at ASC",
+        )
+        .bind(account_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn archive_logs_before(
+        &self,
+        cutoff_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> AppResult<crate::domain::LogRetentionOutcome> {
+        let total_row = sqlx::query_as::<_, CountRow>(
+            "SELECT COUNT(*) AS count FROM logs WHERE occurred_at < $1",
+        )
+        .bind(cutoff_before.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await?;
+
+        if total_row.count == 0 {
+            return Ok(crate::domain::LogRetentionOutcome {
+                archived_batches: 0,
+                archived_logs: 0,
+                deleted_logs: 0,
+            });
+        }
+
+        let account_rows = sqlx::query_as::<_, LogGroupCountRow>(
+            "SELECT account_id AS key, COUNT(*) AS count FROM logs WHERE occurred_at < $1 GROUP BY account_id ORDER BY account_id ASC",
+        )
+        .bind(cutoff_before.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+        let level_rows = sqlx::query_as::<_, LogGroupCountRow>(
+            "SELECT level AS key, COUNT(*) AS count FROM logs WHERE occurred_at < $1 GROUP BY level ORDER BY level ASC",
+        )
+        .bind(cutoff_before.to_rfc3339())
+        .fetch_all(&self.pool)
+        .await?;
+        let range_row = sqlx::query_as::<_, LogRangeRow>(
+            "SELECT MIN(occurred_at) AS earliest, MAX(occurred_at) AS latest FROM logs WHERE occurred_at < $1",
+        )
+        .bind(cutoff_before.to_rfc3339())
+        .fetch_one(&self.pool)
+        .await?;
+
+        let summary = json!({
+            "accounts": account_rows
+                .into_iter()
+                .map(|row| json!({ "account_id": row.key, "count": row.count }))
+                .collect::<Vec<_>>(),
+            "levels": level_rows
+                .into_iter()
+                .map(|row| json!({ "level": row.key, "count": row.count }))
+                .collect::<Vec<_>>(),
+            "earliest_occurred_at": range_row.earliest,
+            "latest_occurred_at": range_row.latest,
+        });
+        let archive = LogArchive {
+            id: Uuid::new_v4(),
+            cutoff_before,
+            log_count: total_row.count,
+            summary,
+            created_at: now,
+        };
+        let mut tx = self.pool.begin().await?;
+
+        sqlx::query(
+            "INSERT INTO log_archives (id, cutoff_before, log_count, summary_json, created_at) VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(archive.id.to_string())
+        .bind(archive.cutoff_before.to_rfc3339())
+        .bind(archive.log_count as i32)
+        .bind(serde_json::to_string(&archive.summary)?)
+        .bind(archive.created_at.to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM logs WHERE occurred_at < $1")
+            .bind(cutoff_before.to_rfc3339())
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        Ok(crate::domain::LogRetentionOutcome {
+            archived_batches: 1,
+            archived_logs: archive.log_count,
+            deleted_logs: archive.log_count,
+        })
+    }
+
+    pub async fn list_log_archives(&self) -> AppResult<Vec<LogArchive>> {
+        sqlx::query_as::<_, LogArchiveRow>(
+            "SELECT id, cutoff_before, log_count, summary_json, created_at FROM log_archives ORDER BY created_at ASC",
+        )
         .fetch_all(&self.pool)
         .await?
         .into_iter()
@@ -547,6 +704,22 @@ impl Repository {
 
         tx.commit().await?;
         Ok(notification)
+    }
+
+    pub async fn find_latest_notification_for_bug(
+        &self,
+        bug_id: Uuid,
+        provider: NotificationProvider,
+    ) -> AppResult<Option<NotificationRecord>> {
+        sqlx::query_as::<_, NotificationRecordRow>(
+            "SELECT id, bug_id, provider, message, sent_at FROM notifications WHERE bug_id = $1 AND provider = $2 ORDER BY sent_at DESC LIMIT 1",
+        )
+        .bind(bug_id.to_string())
+        .bind(provider.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
     }
 
     pub async fn record_notification_skip(
@@ -888,6 +1061,66 @@ impl TryFrom<OccurrenceRow> for Occurrence {
 }
 
 #[derive(Debug, FromRow)]
+struct LogRecordRow {
+    id: String,
+    account_id: String,
+    agent_id: String,
+    language: String,
+    level: String,
+    message: String,
+    stacktrace: Option<String>,
+    occurred_at: String,
+    service: Option<String>,
+    environment: Option<String>,
+    attributes_json: String,
+    created_at: String,
+}
+
+impl TryFrom<LogRecordRow> for LogRecord {
+    type Error = AppError;
+
+    fn try_from(row: LogRecordRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            account_id: Uuid::parse_str(&row.account_id)?,
+            agent_id: Uuid::parse_str(&row.agent_id)?,
+            language: row.language,
+            level: Severity::from_str(&row.level)?,
+            message: row.message,
+            stacktrace: row.stacktrace,
+            occurred_at: parse_rfc3339_utc(&row.occurred_at)?,
+            service: row.service,
+            environment: row.environment,
+            attributes: serde_json::from_str(&row.attributes_json)?,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct LogArchiveRow {
+    id: String,
+    cutoff_before: String,
+    log_count: i32,
+    summary_json: String,
+    created_at: String,
+}
+
+impl TryFrom<LogArchiveRow> for LogArchive {
+    type Error = AppError;
+
+    fn try_from(row: LogArchiveRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            cutoff_before: parse_rfc3339_utc(&row.cutoff_before)?,
+            log_count: row.log_count as i64,
+            summary: serde_json::from_str(&row.summary_json)?,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
 struct TicketRow {
     id: String,
     bug_id: String,
@@ -916,6 +1149,29 @@ impl TryFrom<TicketRow> for Ticket {
             status: row.status,
             created_at: parse_rfc3339_utc(&row.created_at)?,
             updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct NotificationRecordRow {
+    id: String,
+    bug_id: String,
+    provider: String,
+    message: String,
+    sent_at: String,
+}
+
+impl TryFrom<NotificationRecordRow> for NotificationRecord {
+    type Error = AppError;
+
+    fn try_from(row: NotificationRecordRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            bug_id: Uuid::parse_str(&row.bug_id)?,
+            provider: NotificationProvider::from_str(&row.provider)?,
+            message: row.message,
+            sent_at: parse_rfc3339_utc(&row.sent_at)?,
         })
     }
 }
@@ -993,4 +1249,16 @@ impl TryFrom<NotificationEventRow> for NotificationEvent {
 #[derive(Debug, FromRow)]
 struct CountRow {
     count: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct LogGroupCountRow {
+    key: String,
+    count: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct LogRangeRow {
+    earliest: Option<String>,
+    latest: Option<String>,
 }

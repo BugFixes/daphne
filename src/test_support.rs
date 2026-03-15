@@ -18,6 +18,8 @@ pub(crate) async fn test_config_with_disabled_features(
         feature_flags_provider: "local".to_string(),
         policy_provider: "local".to_string(),
         policy2_engine_url: "https://api.policy2.net/run".to_string(),
+        notification_cooldown_minutes: 0,
+        log_retention_days: 30,
         flagsgg_project_id: None,
         flagsgg_agent_id: None,
         flagsgg_environment_id: None,
@@ -33,7 +35,7 @@ pub(crate) async fn reset_database() {
         .expect("test database pool");
 
     sqlx::query(
-        "TRUNCATE TABLE ticket_events, notification_events, account_provider_configs, ticket_comments, tickets, notifications, occurrences, bugs, agents, accounts RESTART IDENTITY CASCADE",
+        "TRUNCATE TABLE log_archives, logs, ticket_events, notification_events, account_provider_configs, ticket_comments, tickets, notifications, occurrences, bugs, agents, accounts RESTART IDENTITY CASCADE",
     )
     .execute(&pool)
     .await

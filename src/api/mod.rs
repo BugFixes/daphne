@@ -13,8 +13,9 @@ use serde_json::Value;
 use crate::{
     AppError, AppResult,
     domain::{
-        CreateAccountRequest, CreateAgentRequest, GoBugPayload, GoLogPayload, Severity,
-        StacktraceEvent, StacktraceEventPayload,
+        AuthenticatedStacktraceEventPayload, CreateAccountRequest, CreateAgentRequest,
+        GoBugPayload, GoLogPayload, LogEvent, LogEventPayload, Severity, StacktraceEvent,
+        StacktraceEventPayload,
     },
     repository::Repository,
     service::IntakeService,
@@ -32,8 +33,11 @@ pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -
         .route("/v1/accounts", post(create_account))
         .route("/v1/agents", post(create_agent))
         .route("/v1/events/stacktraces", post(ingest_stacktrace))
+        .route("/v1/events/bugs", post(ingest_authenticated_stacktrace))
+        .route("/v1/events/logs", post(ingest_log_event))
         .route("/v1/log", post(ingest_go_log))
         .route("/v1/bug", post(ingest_go_bug))
+        .route("/v1/logs/retention/run", post(run_log_retention))
         .route("/log", post(ingest_go_log))
         .route("/bug", post(ingest_go_bug))
         .with_state(AppState {
@@ -73,14 +77,27 @@ async fn ingest_stacktrace(
     Ok(Json(outcome))
 }
 
+async fn ingest_authenticated_stacktrace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AuthenticatedStacktraceEventPayload>,
+) -> AppResult<Json<crate::domain::IntakeOutcome>> {
+    let auth = extract_agent_auth(&headers)?;
+    let outcome = state
+        .intake_service
+        .ingest(payload.into_stacktrace_event(auth.key, auth.secret))
+        .await?;
+    Ok(Json(outcome))
+}
+
 async fn ingest_go_log(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<GoLogPayload>,
-) -> AppResult<Json<crate::domain::IntakeOutcome>> {
+) -> AppResult<Json<crate::domain::LogIntakeOutcome>> {
     let auth = extract_agent_auth(&headers)?;
     let event = map_go_log_payload(auth, payload)?;
-    let outcome = state.intake_service.ingest(event).await?;
+    let outcome = state.intake_service.ingest_log(event).await?;
     Ok(Json(outcome))
 }
 
@@ -95,28 +112,63 @@ async fn ingest_go_bug(
     Ok(Json(outcome))
 }
 
-fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<StacktraceEvent> {
-    let level = parse_level(&payload.level)?;
+async fn ingest_log_event(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<LogEventPayload>,
+) -> AppResult<Json<crate::domain::LogIntakeOutcome>> {
+    let auth = extract_agent_auth(&headers)?;
+    let outcome = state
+        .intake_service
+        .ingest_log(payload.into_log_event(auth.key, auth.secret))
+        .await?;
+    Ok(Json(outcome))
+}
+
+async fn run_log_retention(
+    State(state): State<AppState>,
+) -> AppResult<Json<crate::domain::LogRetentionOutcome>> {
+    let outcome = state
+        .intake_service
+        .run_log_retention(chrono::Utc::now())
+        .await?;
+    Ok(Json(outcome))
+}
+
+fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<LogEvent> {
+    let GoLogPayload {
+        log,
+        level,
+        file,
+        line,
+        line_number: _,
+        log_fmt,
+        stack,
+    } = payload;
+    let level = parse_level(&level)?;
     let mut parts = Vec::new();
 
-    if let Some(location) = format_location(payload.file.as_deref(), payload.line.as_deref()) {
+    if let Some(location) = format_location(file.as_deref(), line.as_deref()) {
         parts.push(location);
     }
-    if !payload.log.trim().is_empty() {
-        parts.push(payload.log);
+    if !log.trim().is_empty() {
+        parts.push(log.clone());
     }
-    if let Some(log_fmt) = payload.log_fmt.filter(|value| !value.trim().is_empty()) {
+    if let Some(log_fmt) = log_fmt.filter(|value| !value.trim().is_empty()) {
         parts.push(log_fmt);
     }
-    if let Some(stack) = payload.stack.and_then(|value| decode_go_bytes(&value)) {
+    if let Some(stack) = stack.and_then(|value| decode_go_bytes(&value)) {
         parts.push(stack);
     }
 
-    Ok(StacktraceEvent {
+    let stacktrace = (!parts.is_empty()).then(|| parts.join("\n"));
+
+    Ok(LogEvent {
         agent_key: auth.key,
         agent_secret: Some(auth.secret),
         language: "go".to_string(),
-        stacktrace: parts.join("\n"),
+        message: log,
+        stacktrace,
         level,
         occurred_at: None,
         service: None,
