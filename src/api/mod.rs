@@ -9,6 +9,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
 use serde_json::Value;
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     AppError, AppResult,
@@ -21,6 +22,7 @@ use crate::{
     repository::Repository,
     service::IntakeService,
 };
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -53,6 +55,14 @@ pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -
         .route("/v1/logs/retention/run", post(run_log_retention))
         .route("/log", post(ingest_go_log))
         .route("/bug", post(ingest_go_bug))
+        .route("/api/dashboard/bugs", get(list_bugs))
+        .route("/api/dashboard/bugs/{bug_id}", get(get_bug_detail))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        )
         .with_state(AppState {
             repository,
             intake_service,
@@ -75,10 +85,10 @@ async fn list_organizations(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<Vec<crate::domain::OrganizationAccess>>> {
-    let user_email = extract_current_user_email(&headers)?;
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let organizations = state
         .repository
-        .list_organizations_for_user(&user_email)
+        .list_organizations_for_user(&clerk_user_id)
         .await?;
     Ok(Json(organizations))
 }
@@ -89,10 +99,10 @@ async fn add_organization_member(
     headers: HeaderMap,
     Json(request): Json<AddOrganizationMemberRequest>,
 ) -> AppResult<Json<crate::domain::MembershipRecord>> {
-    let user_email = extract_current_user_email(&headers)?;
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let membership = state
         .repository
-        .add_organization_member(organization_id, &user_email, request)
+        .add_organization_member(organization_id, &clerk_user_id, request)
         .await?;
     Ok(Json(membership))
 }
@@ -102,10 +112,10 @@ async fn list_organization_memberships(
     Path(organization_id): Path<uuid::Uuid>,
     headers: HeaderMap,
 ) -> AppResult<Json<Vec<crate::domain::MembershipRecord>>> {
-    let user_email = extract_current_user_email(&headers)?;
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let memberships = state
         .repository
-        .list_organization_memberships(organization_id, &user_email)
+        .list_organization_memberships(organization_id, &clerk_user_id)
         .await?;
     Ok(Json(memberships))
 }
@@ -116,10 +126,10 @@ async fn update_organization_membership(
     headers: HeaderMap,
     Json(request): Json<UpdateOrganizationMembershipRequest>,
 ) -> AppResult<Json<crate::domain::MembershipRecord>> {
-    let user_email = extract_current_user_email(&headers)?;
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let membership = state
         .repository
-        .update_organization_membership(organization_id, membership_id, &user_email, request)
+        .update_organization_membership(organization_id, membership_id, &clerk_user_id, request)
         .await?;
     Ok(Json(membership))
 }
@@ -207,6 +217,279 @@ async fn run_log_retention(
         .run_log_retention(chrono::Utc::now())
         .await?;
     Ok(Json(outcome))
+}
+
+async fn list_bugs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<DashboardBugListResponse>> {
+    let clerk_org_id = require_dashboard_clerk_org_access(&state, &headers).await?;
+    let rows = state.repository.list_bugs(&clerk_org_id).await?;
+    let bugs: Vec<DashboardBugSummary> = rows
+        .into_iter()
+        .map(|row| {
+            let title = first_meaningful_line(&row.normalized_stacktrace).unwrap_or_else(|| {
+                first_meaningful_line(&row.latest_stacktrace).unwrap_or_default()
+            });
+            let tone = severity_to_tone(&row.severity);
+            DashboardBugSummary {
+                id: row.id,
+                title,
+                severity: row.severity,
+                language: row.language,
+                first_seen_at: row.first_seen_at,
+                last_seen_at: row.last_seen_at,
+                occurrence_count: row.occurrence_count,
+                ticket_status: row.ticket_status.unwrap_or_else(|| "none".to_string()),
+                ticket_provider: row.ticket_provider.unwrap_or_else(|| "—".to_string()),
+                notification_status: row.notification_status,
+                account_name: row.account_name,
+                agent_name: row.agent_name,
+                tone,
+            }
+        })
+        .collect();
+
+    Ok(Json(DashboardBugListResponse {
+        title: "Bug inbox".to_string(),
+        summary: "Incoming stacktraces, deduplication clusters, and investigation entrypoints for the operator shift.".to_string(),
+        bugs,
+    }))
+}
+
+async fn get_bug_detail(
+    State(state): State<AppState>,
+    Path(bug_id): Path<String>,
+    headers: HeaderMap,
+) -> AppResult<Json<DashboardBugDetail>> {
+    let clerk_org_id = require_dashboard_clerk_org_access(&state, &headers).await?;
+    let bug_uuid = Uuid::parse_str(&bug_id)?;
+    let bug = state
+        .repository
+        .find_bug_by_id_scoped(bug_uuid, &clerk_org_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("bug {bug_id}")))?;
+
+    let account = state.repository.find_account_by_id(bug.account_id).await?;
+    let agent = state.repository.find_agent_by_id(bug.agent_id).await?;
+    let occurrences = state.repository.list_occurrences_for_bug(bug_uuid).await?;
+    let ticket = state.repository.find_ticket_for_bug(bug_uuid).await?;
+    let notifications = state
+        .repository
+        .list_notifications_for_bug(bug_uuid)
+        .await?;
+    let notification_events = state
+        .repository
+        .list_notification_events_for_bug(bug_uuid)
+        .await?;
+
+    let title = first_meaningful_line(&bug.normalized_stacktrace)
+        .unwrap_or_else(|| first_meaningful_line(&bug.latest_stacktrace).unwrap_or_default());
+    let tone = severity_to_tone(&bug.severity.to_string());
+
+    let tickets: Vec<DashboardTicket> = ticket
+        .into_iter()
+        .map(|t| DashboardTicket {
+            id: t.id.to_string(),
+            provider: t.provider.to_string(),
+            remote_id: t.remote_id,
+            remote_url: t.remote_url,
+            priority: t.priority.to_string(),
+            status: t.status,
+            created_at: t.created_at.to_rfc3339(),
+        })
+        .collect();
+
+    let occ_items: Vec<DashboardOccurrence> = occurrences
+        .into_iter()
+        .rev()
+        .take(20)
+        .map(|o| DashboardOccurrence {
+            id: o.id.to_string(),
+            occurred_at: o.occurred_at.to_rfc3339(),
+            severity: o.severity.to_string(),
+            environment: o.environment.unwrap_or_else(|| "—".to_string()),
+            service: o.service.unwrap_or_else(|| "—".to_string()),
+            agent: agent
+                .as_ref()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "—".to_string()),
+        })
+        .collect();
+
+    let ntf_items: Vec<DashboardNotification> = notifications
+        .into_iter()
+        .map(|n| DashboardNotification {
+            id: n.id.to_string(),
+            provider: n.provider.to_string(),
+            message: n.message,
+            sent_at: n.sent_at.to_rfc3339(),
+        })
+        .collect();
+
+    let ntf_event_items: Vec<DashboardNotificationEvent> = notification_events
+        .into_iter()
+        .map(|e| DashboardNotificationEvent {
+            id: e.id.to_string(),
+            provider: e.provider.to_string(),
+            status: e.status.to_string(),
+            reason: e.reason,
+            severity: e.severity.to_string(),
+            ticket_action: e.ticket_action.to_string(),
+            occurred_at: e.occurred_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(DashboardBugDetail {
+        id: bug.id.to_string(),
+        title,
+        severity: bug.severity.to_string(),
+        language: bug.language,
+        first_seen_at: bug.first_seen_at.to_rfc3339(),
+        last_seen_at: bug.last_seen_at.to_rfc3339(),
+        occurrence_count: bug.occurrence_count,
+        tone,
+        latest_stacktrace: bug.latest_stacktrace,
+        normalized_stacktrace: bug.normalized_stacktrace,
+        stacktrace_hash: bug.stacktrace_hash,
+        account_name: account.map(|a| a.name).unwrap_or_else(|| "—".to_string()),
+        agent_name: agent.map(|a| a.name).unwrap_or_else(|| "—".to_string()),
+        occurrences: occ_items,
+        tickets,
+        notifications: ntf_items,
+        notification_events: ntf_event_items,
+    }))
+}
+
+async fn require_dashboard_clerk_org_access(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<String> {
+    let clerk_user_id = extract_current_clerk_user_id(headers)?;
+    let clerk_org_id = extract_required_clerk_org_id(headers)?;
+    let organizations = state
+        .repository
+        .list_organizations_for_user(&clerk_user_id)
+        .await?;
+    ensure_user_can_access_clerk_org(&organizations, &clerk_org_id)?;
+    Ok(clerk_org_id)
+}
+
+fn first_meaningful_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+fn ensure_user_can_access_clerk_org(
+    organizations: &[crate::domain::OrganizationAccess],
+    clerk_org_id: &str,
+) -> AppResult<()> {
+    if organizations
+        .iter()
+        .any(|access| access.organization.clerk_org_id.as_deref() == Some(clerk_org_id))
+    {
+        return Ok(());
+    }
+
+    Err(AppError::Validation(format!(
+        "authenticated user is not a member of organization {clerk_org_id}"
+    )))
+}
+
+fn severity_to_tone(severity: &str) -> String {
+    match severity {
+        "fatal" | "error" => "critical".to_string(),
+        "warn" => "warn".to_string(),
+        "info" | "debug" => "good".to_string(),
+        _ => "neutral".to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct DashboardBugListResponse {
+    title: String,
+    summary: String,
+    bugs: Vec<DashboardBugSummary>,
+}
+
+#[derive(Serialize)]
+struct DashboardBugSummary {
+    id: String,
+    title: String,
+    severity: String,
+    language: String,
+    first_seen_at: String,
+    last_seen_at: String,
+    occurrence_count: i64,
+    ticket_status: String,
+    ticket_provider: String,
+    notification_status: String,
+    account_name: String,
+    agent_name: String,
+    tone: String,
+}
+
+#[derive(Serialize)]
+struct DashboardBugDetail {
+    id: String,
+    title: String,
+    severity: String,
+    language: String,
+    first_seen_at: String,
+    last_seen_at: String,
+    occurrence_count: i64,
+    tone: String,
+    latest_stacktrace: String,
+    normalized_stacktrace: String,
+    stacktrace_hash: String,
+    account_name: String,
+    agent_name: String,
+    occurrences: Vec<DashboardOccurrence>,
+    tickets: Vec<DashboardTicket>,
+    notifications: Vec<DashboardNotification>,
+    notification_events: Vec<DashboardNotificationEvent>,
+}
+
+#[derive(Serialize)]
+struct DashboardOccurrence {
+    id: String,
+    occurred_at: String,
+    severity: String,
+    environment: String,
+    service: String,
+    agent: String,
+}
+
+#[derive(Serialize)]
+struct DashboardTicket {
+    id: String,
+    provider: String,
+    remote_id: String,
+    remote_url: String,
+    priority: String,
+    status: String,
+    created_at: String,
+}
+
+#[derive(Serialize)]
+struct DashboardNotification {
+    id: String,
+    provider: String,
+    message: String,
+    sent_at: String,
+}
+
+#[derive(Serialize)]
+struct DashboardNotificationEvent {
+    id: String,
+    provider: String,
+    status: String,
+    reason: String,
+    severity: String,
+    ticket_action: String,
+    occurred_at: String,
 }
 
 fn map_go_log_payload(auth: AgentAuth, payload: GoLogPayload) -> AppResult<LogEvent> {
@@ -299,13 +582,22 @@ fn extract_agent_auth(headers: &HeaderMap) -> AppResult<AgentAuth> {
     })
 }
 
-fn extract_current_user_email(headers: &HeaderMap) -> AppResult<String> {
+fn extract_required_clerk_org_id(headers: &HeaderMap) -> AppResult<String> {
     headers
-        .get("X-User-Email")
+        .get("X-Clerk-Org-Id")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| AppError::Validation("missing X-User-Email header".to_string()))
+        .map(|value| value.trim().to_string())
+        .ok_or_else(|| AppError::Validation("missing X-Clerk-Org-Id header".to_string()))
+}
+
+fn extract_current_clerk_user_id(headers: &HeaderMap) -> AppResult<String> {
+    headers
+        .get("X-Clerk-User-Id")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string())
+        .ok_or_else(|| AppError::Validation("missing X-Clerk-User-Id header".to_string()))
 }
 
 fn parse_level(value: &str) -> AppResult<Severity> {
