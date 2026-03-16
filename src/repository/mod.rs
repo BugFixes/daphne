@@ -141,6 +141,21 @@ impl Repository {
         .collect()
     }
 
+    pub async fn find_organization_by_clerk_id(
+        &self,
+        clerk_org_id: &str,
+    ) -> AppResult<Organization> {
+        let row = sqlx::query_as::<_, OrganizationRow>(
+            "SELECT id, name, clerk_org_id, created_at, updated_at FROM organizations WHERE clerk_org_id = $1",
+        )
+        .bind(clerk_org_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("organization with clerk_org_id {clerk_org_id}")))?;
+
+        row.try_into()
+    }
+
     pub async fn add_organization_member(
         &self,
         organization_id: Uuid,

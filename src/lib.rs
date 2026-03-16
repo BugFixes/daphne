@@ -27,6 +27,8 @@ pub type AppResult<T> = Result<T, AppError>;
 pub enum AppError {
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("forbidden: {0}")]
+    Forbidden(String),
     #[error("validation failed: {0}")]
     Validation(String),
     #[error(transparent)]
@@ -56,6 +58,7 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let status = match self {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Validation(_) => StatusCode::BAD_REQUEST,
             Self::Sqlx(_)
             | Self::Io(_)

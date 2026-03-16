@@ -16,8 +16,8 @@ use crate::{
     domain::{
         AddOrganizationMemberRequest, AuthenticatedStacktraceEventPayload, CreateAccountRequest,
         CreateAgentRequest, CreateOrganizationRequest, GoBugPayload, GoLogPayload, LogEvent,
-        LogEventPayload, Severity, StacktraceEvent, StacktraceEventPayload,
-        UpdateOrganizationMembershipRequest,
+        LogEventPayload, OrganizationAccess, Permission, Severity, StacktraceEvent,
+        StacktraceEventPayload, UpdateOrganizationMembershipRequest,
     },
     repository::Repository,
     service::IntakeService,
@@ -99,6 +99,8 @@ async fn add_organization_member(
     headers: HeaderMap,
     Json(request): Json<AddOrganizationMemberRequest>,
 ) -> AppResult<Json<crate::domain::MembershipRecord>> {
+    require_org_permission_by_id(&state, &headers, organization_id, Permission::ManageMembers)
+        .await?;
     let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let membership = state
         .repository
@@ -112,6 +114,8 @@ async fn list_organization_memberships(
     Path(organization_id): Path<uuid::Uuid>,
     headers: HeaderMap,
 ) -> AppResult<Json<Vec<crate::domain::MembershipRecord>>> {
+    require_org_permission_by_id(&state, &headers, organization_id, Permission::ManageMembers)
+        .await?;
     let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let memberships = state
         .repository
@@ -126,6 +130,8 @@ async fn update_organization_membership(
     headers: HeaderMap,
     Json(request): Json<UpdateOrganizationMembershipRequest>,
 ) -> AppResult<Json<crate::domain::MembershipRecord>> {
+    require_org_permission_by_id(&state, &headers, organization_id, Permission::ManageMembers)
+        .await?;
     let clerk_user_id = extract_current_clerk_user_id(&headers)?;
     let membership = state
         .repository
@@ -136,16 +142,26 @@ async fn update_organization_membership(
 
 async fn create_account(
     State(state): State<AppState>,
-    Json(request): Json<CreateAccountRequest>,
+    headers: HeaderMap,
+    Json(mut request): Json<CreateAccountRequest>,
 ) -> AppResult<Json<crate::domain::Account>> {
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+    request.organization_id = Some(org.id);
     let account = state.repository.create_account(request).await?;
     Ok(Json(account))
 }
 
 async fn create_agent(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<CreateAgentRequest>,
 ) -> AppResult<Json<crate::domain::Agent>> {
+    require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
     let agent = state.repository.create_agent(request).await?;
     Ok(Json(agent))
 }
@@ -223,7 +239,8 @@ async fn list_bugs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<DashboardBugListResponse>> {
-    let clerk_org_id = require_dashboard_clerk_org_access(&state, &headers).await?;
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ReadBugs).await?;
     let rows = state.repository.list_bugs(&clerk_org_id).await?;
     let bugs: Vec<DashboardBugSummary> = rows
         .into_iter()
@@ -262,7 +279,8 @@ async fn get_bug_detail(
     Path(bug_id): Path<String>,
     headers: HeaderMap,
 ) -> AppResult<Json<DashboardBugDetail>> {
-    let clerk_org_id = require_dashboard_clerk_org_access(&state, &headers).await?;
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ReadBugs).await?;
     let bug_uuid = Uuid::parse_str(&bug_id)?;
     let bug = state
         .repository
@@ -364,6 +382,7 @@ async fn get_bug_detail(
 async fn require_dashboard_clerk_org_access(
     state: &AppState,
     headers: &HeaderMap,
+    permission: Permission,
 ) -> AppResult<String> {
     let clerk_user_id = extract_current_clerk_user_id(headers)?;
     let clerk_org_id = extract_required_clerk_org_id(headers)?;
@@ -372,7 +391,48 @@ async fn require_dashboard_clerk_org_access(
         .list_organizations_for_user(&clerk_user_id)
         .await?;
     ensure_user_can_access_clerk_org(&organizations, &clerk_org_id)?;
+    check_org_permission(&organizations, &clerk_org_id, permission)?;
     Ok(clerk_org_id)
+}
+
+async fn require_org_permission_by_id(
+    state: &AppState,
+    headers: &HeaderMap,
+    organization_id: Uuid,
+    permission: Permission,
+) -> AppResult<()> {
+    let clerk_user_id = extract_current_clerk_user_id(headers)?;
+    let membership = state
+        .repository
+        .find_membership_for_clerk_user_id(organization_id, &clerk_user_id)
+        .await?;
+    if !membership.role.has_permission(permission) {
+        return Err(AppError::Forbidden(format!(
+            "role {} does not have permission {:?}",
+            membership.role, permission
+        )));
+    }
+    Ok(())
+}
+
+fn check_org_permission(
+    organizations: &[OrganizationAccess],
+    clerk_org_id: &str,
+    permission: Permission,
+) -> AppResult<()> {
+    let access = organizations
+        .iter()
+        .find(|a| a.organization.clerk_org_id.as_deref() == Some(clerk_org_id));
+    match access {
+        Some(a) if a.membership.role.has_permission(permission) => Ok(()),
+        Some(a) => Err(AppError::Forbidden(format!(
+            "role {} does not have permission {:?}",
+            a.membership.role, permission
+        ))),
+        None => Err(AppError::Forbidden(format!(
+            "authenticated user is not a member of organization {clerk_org_id}"
+        ))),
+    }
 }
 
 fn first_meaningful_line(text: &str) -> Option<String> {
@@ -393,7 +453,7 @@ fn ensure_user_can_access_clerk_org(
         return Ok(());
     }
 
-    Err(AppError::Validation(format!(
+    Err(AppError::Forbidden(format!(
         "authenticated user is not a member of organization {clerk_org_id}"
     )))
 }
