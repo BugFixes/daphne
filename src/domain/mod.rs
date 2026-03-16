@@ -185,6 +185,32 @@ impl OrganizationRole {
     pub fn can_manage_memberships(self) -> bool {
         matches!(self, Self::Owner | Self::Admin)
     }
+
+    pub fn has_permission(self, permission: Permission) -> bool {
+        match self {
+            Self::Owner => true,
+            Self::Admin => matches!(
+                permission,
+                Permission::ReadBugs
+                    | Permission::WriteBugs
+                    | Permission::ManageAgents
+                    | Permission::ManageProviders
+                    | Permission::ManageMembers
+            ),
+            Self::Member => matches!(permission, Permission::ReadBugs),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    ReadBugs,
+    WriteBugs,
+    ManageAgents,
+    ManageProviders,
+    ManageMembers,
+    ManageOrganization,
 }
 
 impl fmt::Display for OrganizationRole {
@@ -925,4 +951,67 @@ pub struct IntakeOutcome {
     pub ticket: Option<Ticket>,
     pub ai_recommendation: Option<String>,
     pub notification: NotificationOutcome,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OrganizationRole, Permission};
+
+    #[test]
+    fn owner_has_all_permissions() {
+        let all = [
+            Permission::ReadBugs,
+            Permission::WriteBugs,
+            Permission::ManageAgents,
+            Permission::ManageProviders,
+            Permission::ManageMembers,
+            Permission::ManageOrganization,
+        ];
+        for perm in all {
+            assert!(
+                OrganizationRole::Owner.has_permission(perm),
+                "Owner should have {perm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_has_operational_permissions_but_not_manage_organization() {
+        let allowed = [
+            Permission::ReadBugs,
+            Permission::WriteBugs,
+            Permission::ManageAgents,
+            Permission::ManageProviders,
+            Permission::ManageMembers,
+        ];
+        for perm in allowed {
+            assert!(
+                OrganizationRole::Admin.has_permission(perm),
+                "Admin should have {perm:?}"
+            );
+        }
+        assert!(
+            !OrganizationRole::Admin.has_permission(Permission::ManageOrganization),
+            "Admin should not have ManageOrganization"
+        );
+    }
+
+    #[test]
+    fn member_can_only_read_bugs() {
+        assert!(OrganizationRole::Member.has_permission(Permission::ReadBugs));
+
+        let denied = [
+            Permission::WriteBugs,
+            Permission::ManageAgents,
+            Permission::ManageProviders,
+            Permission::ManageMembers,
+            Permission::ManageOrganization,
+        ];
+        for perm in denied {
+            assert!(
+                !OrganizationRole::Member.has_permission(perm),
+                "Member should not have {perm:?}"
+            );
+        }
+    }
 }
