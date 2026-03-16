@@ -279,6 +279,267 @@ mod rbac_integration {
     }
 }
 
+mod role_management_integration {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use serial_test::serial;
+    use tower::ServiceExt;
+
+    use crate::domain::{
+        AddOrganizationMemberRequest, CreateOrganizationRequest, OrganizationRole,
+    };
+    use crate::test_support::{build_test_app, reset_database};
+
+    async fn seed_org(
+        repository: &crate::repository::Repository,
+        clerk_org_id: &str,
+        owner_clerk_user_id: &str,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        let org = repository
+            .create_organization(CreateOrganizationRequest {
+                name: "Test Org".to_string(),
+                clerk_org_id: Some(clerk_org_id.to_string()),
+                owner_clerk_user_id: owner_clerk_user_id.to_string(),
+                owner_name: "Owner".to_string(),
+            })
+            .await
+            .expect("org");
+        let owner_memberships = repository
+            .list_organization_memberships(org.organization.id, owner_clerk_user_id)
+            .await
+            .expect("memberships");
+        let owner_user_id = owner_memberships[0].membership.user_id;
+        (org.organization.id, owner_user_id)
+    }
+
+    async fn add_member(
+        repository: &crate::repository::Repository,
+        org_id: uuid::Uuid,
+        owner_clerk_user_id: &str,
+        member_clerk_user_id: &str,
+        role: OrganizationRole,
+    ) -> uuid::Uuid {
+        let record = repository
+            .add_organization_member(
+                org_id,
+                owner_clerk_user_id,
+                AddOrganizationMemberRequest {
+                    clerk_user_id: member_clerk_user_id.to_string(),
+                    name: "Member".to_string(),
+                    role,
+                },
+            )
+            .await
+            .expect("member");
+        record.membership.user_id
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn admin_can_list_members() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, _) = seed_org(&repository, "org_lm_admin", "user_owner_lm").await;
+        add_member(
+            &repository,
+            org_id,
+            "user_owner_lm",
+            "user_admin_lm",
+            OrganizationRole::Admin,
+        )
+        .await;
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/organizations/{org_id}/members"))
+            .header("X-Clerk-User-Id", "user_admin_lm")
+            .header("X-Clerk-Org-Id", "org_lm_admin")
+            .body(Body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn member_cannot_list_members() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, _) = seed_org(&repository, "org_lm_member", "user_owner_lm2").await;
+        add_member(
+            &repository,
+            org_id,
+            "user_owner_lm2",
+            "user_member_lm",
+            OrganizationRole::Member,
+        )
+        .await;
+
+        let request = Request::builder()
+            .method("GET")
+            .uri(format!("/v1/organizations/{org_id}/members"))
+            .header("X-Clerk-User-Id", "user_member_lm")
+            .header("X-Clerk-Org-Id", "org_lm_member")
+            .body(Body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn admin_can_update_member_role() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, _) = seed_org(&repository, "org_ur_admin", "user_owner_ur").await;
+        let member_user_id = add_member(
+            &repository,
+            org_id,
+            "user_owner_ur",
+            "user_member_ur",
+            OrganizationRole::Member,
+        )
+        .await;
+        // Also add a second admin so last-admin guard won't trigger
+        add_member(
+            &repository,
+            org_id,
+            "user_owner_ur",
+            "user_admin_ur",
+            OrganizationRole::Admin,
+        )
+        .await;
+
+        let body = serde_json::to_vec(&serde_json::json!({"role": "admin"})).expect("json");
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/v1/organizations/{org_id}/members/{member_user_id}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_admin_ur")
+            .header("X-Clerk-Org-Id", "org_ur_admin")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn member_cannot_update_member_role() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, _) = seed_org(&repository, "org_ur_member", "user_owner_ur2").await;
+        let other_user_id = add_member(
+            &repository,
+            org_id,
+            "user_owner_ur2",
+            "user_other_ur",
+            OrganizationRole::Member,
+        )
+        .await;
+        add_member(
+            &repository,
+            org_id,
+            "user_owner_ur2",
+            "user_member_ur2",
+            OrganizationRole::Member,
+        )
+        .await;
+
+        let body = serde_json::to_vec(&serde_json::json!({"role": "admin"})).expect("json");
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/v1/organizations/{org_id}/members/{other_user_id}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_member_ur2")
+            .header("X-Clerk-Org-Id", "org_ur_member")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn last_admin_guard_blocks_downgrade_of_only_admin() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, _) = seed_org(&repository, "org_lag", "user_owner_lag").await;
+        let admin_user_id = add_member(
+            &repository,
+            org_id,
+            "user_owner_lag",
+            "user_admin_lag",
+            OrganizationRole::Admin,
+        )
+        .await;
+
+        // org_lag has 1 owner + 1 admin; downgrading the only admin → blocked
+        let body = serde_json::to_vec(&serde_json::json!({"role": "member"})).expect("json");
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/v1/organizations/{org_id}/members/{admin_user_id}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_owner_lag")
+            .header("X-Clerk-Org-Id", "org_lag")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn last_admin_guard_allows_downgrade_when_another_admin_exists() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, _) = seed_org(&repository, "org_lag2", "user_owner_lag2").await;
+        let admin_user_id = add_member(
+            &repository,
+            org_id,
+            "user_owner_lag2",
+            "user_admin_lag2a",
+            OrganizationRole::Admin,
+        )
+        .await;
+        // Add a second admin so the guard allows the downgrade
+        add_member(
+            &repository,
+            org_id,
+            "user_owner_lag2",
+            "user_admin_lag2b",
+            OrganizationRole::Admin,
+        )
+        .await;
+
+        let body = serde_json::to_vec(&serde_json::json!({"role": "member"})).expect("json");
+        let request = Request::builder()
+            .method("PATCH")
+            .uri(format!(
+                "/v1/organizations/{org_id}/members/{admin_user_id}"
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_owner_lag2")
+            .header("X-Clerk-Org-Id", "org_lag2")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
+
 #[test]
 fn decodes_go_log_stack_and_headers_into_event() {
     let payload = GoLogPayload {

@@ -45,6 +45,14 @@ pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -
             "/v1/organizations/{organization_id}/memberships/{membership_id}",
             patch(update_organization_membership),
         )
+        .route(
+            "/v1/organizations/{organization_id}/members",
+            get(list_members),
+        )
+        .route(
+            "/v1/organizations/{organization_id}/members/{user_id}",
+            patch(update_member_role),
+        )
         .route("/v1/accounts", post(create_account))
         .route("/v1/agents", post(create_agent))
         .route("/v1/events/stacktraces", post(ingest_stacktrace))
@@ -138,6 +146,37 @@ async fn update_organization_membership(
         .update_organization_membership(organization_id, membership_id, &clerk_user_id, request)
         .await?;
     Ok(Json(membership))
+}
+
+async fn list_members(
+    State(state): State<AppState>,
+    Path(organization_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<crate::domain::MembershipRecord>>> {
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
+    require_org_permission_by_id(&state, &headers, organization_id, Permission::ManageMembers)
+        .await?;
+    let members = state
+        .repository
+        .list_organization_memberships(organization_id, &clerk_user_id)
+        .await?;
+    Ok(Json(members))
+}
+
+async fn update_member_role(
+    State(state): State<AppState>,
+    Path((organization_id, user_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+    Json(request): Json<crate::domain::UpdateOrganizationMembershipRequest>,
+) -> AppResult<Json<crate::domain::MembershipRecord>> {
+    require_org_permission_by_id(&state, &headers, organization_id, Permission::ManageMembers)
+        .await?;
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
+    let record = state
+        .repository
+        .update_member_role_by_user_id(organization_id, user_id, &clerk_user_id, request)
+        .await?;
+    Ok(Json(record))
 }
 
 async fn create_account(

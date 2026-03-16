@@ -274,6 +274,81 @@ impl Repository {
         })
     }
 
+    pub async fn update_member_role_by_user_id(
+        &self,
+        organization_id: Uuid,
+        user_id: Uuid,
+        actor_clerk_user_id: &str,
+        request: UpdateOrganizationMembershipRequest,
+    ) -> AppResult<MembershipRecord> {
+        request.validate()?;
+        let actor_membership = self
+            .find_membership_for_clerk_user_id(organization_id, actor_clerk_user_id)
+            .await?;
+        if !actor_membership.role.can_manage_memberships() {
+            return Err(AppError::Forbidden(
+                "only organization owners and admins can manage memberships".to_string(),
+            ));
+        }
+
+        let record = sqlx::query_as::<_, MembershipRecordRow>(
+            "SELECT m.id AS membership_id, m.organization_id AS membership_organization_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at, u.clerk_user_id AS user_clerk_user_id, u.email AS user_email, u.name AS user_name, u.created_at AS user_created_at, u.updated_at AS user_updated_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = $1 AND m.user_id = $2",
+        )
+        .bind(organization_id.to_string())
+        .bind(user_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "user {user_id} in organization {organization_id}"
+            ))
+        })?;
+        let record: MembershipRecord = record.try_into()?;
+
+        if record.membership.role == OrganizationRole::Owner {
+            return Err(AppError::Validation(
+                "owner memberships cannot be changed through this endpoint".to_string(),
+            ));
+        }
+
+        if record.membership.role == OrganizationRole::Admin
+            && request.role != OrganizationRole::Admin
+        {
+            let remaining_admins: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM memberships WHERE organization_id = $1 AND user_id != $2 AND role = 'admin'",
+            )
+            .bind(organization_id.to_string())
+            .bind(user_id.to_string())
+            .fetch_one(&self.pool)
+            .await?;
+            if remaining_admins == 0 {
+                return Err(AppError::Validation(
+                    "cannot remove the last admin from the organization".to_string(),
+                ));
+            }
+        }
+
+        let now = Utc::now();
+        sqlx::query(
+            "UPDATE memberships SET role = $1, updated_at = $2 WHERE organization_id = $3 AND user_id = $4",
+        )
+        .bind(request.role.to_string())
+        .bind(now.to_rfc3339())
+        .bind(organization_id.to_string())
+        .bind(user_id.to_string())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(MembershipRecord {
+            membership: Membership {
+                role: request.role,
+                updated_at: now,
+                ..record.membership
+            },
+            user: record.user,
+        })
+    }
+
     pub async fn create_account(&self, request: CreateAccountRequest) -> AppResult<Account> {
         request.validate()?;
         let CreateAccountRequest {
