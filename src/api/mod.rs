@@ -223,8 +223,8 @@ async fn list_bugs(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<DashboardBugListResponse>> {
-    let clerk_org_id = extract_optional_clerk_org_id(&headers);
-    let rows = state.repository.list_bugs(clerk_org_id.as_deref()).await?;
+    let clerk_org_id = require_dashboard_clerk_org_access(&state, &headers).await?;
+    let rows = state.repository.list_bugs(&clerk_org_id).await?;
     let bugs: Vec<DashboardBugSummary> = rows
         .into_iter()
         .map(|row| {
@@ -262,11 +262,11 @@ async fn get_bug_detail(
     Path(bug_id): Path<String>,
     headers: HeaderMap,
 ) -> AppResult<Json<DashboardBugDetail>> {
-    let clerk_org_id = extract_optional_clerk_org_id(&headers);
+    let clerk_org_id = require_dashboard_clerk_org_access(&state, &headers).await?;
     let bug_uuid = Uuid::parse_str(&bug_id)?;
     let bug = state
         .repository
-        .find_bug_by_id_scoped(bug_uuid, clerk_org_id.as_deref())
+        .find_bug_by_id_scoped(bug_uuid, &clerk_org_id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("bug {bug_id}")))?;
 
@@ -347,7 +347,7 @@ async fn get_bug_detail(
         language: bug.language,
         first_seen_at: bug.first_seen_at.to_rfc3339(),
         last_seen_at: bug.last_seen_at.to_rfc3339(),
-        occurrence_count: bug.occurrence_count as i32,
+        occurrence_count: bug.occurrence_count,
         tone,
         latest_stacktrace: bug.latest_stacktrace,
         normalized_stacktrace: bug.normalized_stacktrace,
@@ -361,11 +361,41 @@ async fn get_bug_detail(
     }))
 }
 
+async fn require_dashboard_clerk_org_access(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<String> {
+    let clerk_user_id = extract_current_clerk_user_id(headers)?;
+    let clerk_org_id = extract_required_clerk_org_id(headers)?;
+    let organizations = state
+        .repository
+        .list_organizations_for_user(&clerk_user_id)
+        .await?;
+    ensure_user_can_access_clerk_org(&organizations, &clerk_org_id)?;
+    Ok(clerk_org_id)
+}
+
 fn first_meaningful_line(text: &str) -> Option<String> {
     text.lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_string)
+}
+
+fn ensure_user_can_access_clerk_org(
+    organizations: &[crate::domain::OrganizationAccess],
+    clerk_org_id: &str,
+) -> AppResult<()> {
+    if organizations
+        .iter()
+        .any(|access| access.organization.clerk_org_id.as_deref() == Some(clerk_org_id))
+    {
+        return Ok(());
+    }
+
+    Err(AppError::Validation(format!(
+        "authenticated user is not a member of organization {clerk_org_id}"
+    )))
 }
 
 fn severity_to_tone(severity: &str) -> String {
@@ -392,7 +422,7 @@ struct DashboardBugSummary {
     language: String,
     first_seen_at: String,
     last_seen_at: String,
-    occurrence_count: i32,
+    occurrence_count: i64,
     ticket_status: String,
     ticket_provider: String,
     notification_status: String,
@@ -409,7 +439,7 @@ struct DashboardBugDetail {
     language: String,
     first_seen_at: String,
     last_seen_at: String,
-    occurrence_count: i32,
+    occurrence_count: i64,
     tone: String,
     latest_stacktrace: String,
     normalized_stacktrace: String,
@@ -552,12 +582,13 @@ fn extract_agent_auth(headers: &HeaderMap) -> AppResult<AgentAuth> {
     })
 }
 
-fn extract_optional_clerk_org_id(headers: &HeaderMap) -> Option<String> {
+fn extract_required_clerk_org_id(headers: &HeaderMap) -> AppResult<String> {
     headers
         .get("X-Clerk-Org-Id")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
         .map(|value| value.trim().to_string())
+        .ok_or_else(|| AppError::Validation("missing X-Clerk-Org-Id header".to_string()))
 }
 
 fn extract_current_clerk_user_id(headers: &HeaderMap) -> AppResult<String> {

@@ -1,14 +1,18 @@
 use axum::http::{HeaderMap, HeaderValue};
 use serde_json::json;
 
+use chrono::Utc;
+use uuid::Uuid;
+
 use crate::domain::{
-    AuthenticatedStacktraceEventPayload, GoBugPayload, GoLogPayload, LogEventPayload, Severity,
-    StacktraceEventPayload,
+    AuthenticatedStacktraceEventPayload, GoBugPayload, GoLogPayload, LogEventPayload, Membership,
+    Organization, OrganizationAccess, OrganizationRole, Severity, StacktraceEventPayload,
 };
 
 use super::{
-    AgentAuth, decode_go_bytes, extract_current_clerk_user_id, format_location, map_go_bug_payload,
-    map_go_log_payload,
+    AgentAuth, decode_go_bytes, ensure_user_can_access_clerk_org, extract_current_clerk_user_id,
+    extract_required_clerk_org_id, first_meaningful_line, format_location, map_go_bug_payload,
+    map_go_log_payload, severity_to_tone,
 };
 
 #[test]
@@ -229,5 +233,102 @@ fn requires_current_clerk_user_id_header() {
     assert_eq!(
         error.to_string(),
         "validation failed: missing X-Clerk-User-Id header"
+    );
+}
+
+#[test]
+fn extracts_required_clerk_org_id_header() {
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Clerk-Org-Id", HeaderValue::from_static("org_123"));
+
+    let org_id = extract_required_clerk_org_id(&headers).expect("clerk org id");
+
+    assert_eq!(org_id, "org_123");
+}
+
+#[test]
+fn requires_clerk_org_id_header() {
+    let error = extract_required_clerk_org_id(&HeaderMap::new()).expect_err("missing header");
+
+    assert_eq!(
+        error.to_string(),
+        "validation failed: missing X-Clerk-Org-Id header"
+    );
+}
+
+#[test]
+fn finds_first_meaningful_line_after_blanks() {
+    assert_eq!(
+        first_meaningful_line("\n  \n panic: worker crashed\nnext line"),
+        Some("panic: worker crashed".to_string())
+    );
+}
+
+#[test]
+fn first_meaningful_line_returns_none_for_blank_input() {
+    assert_eq!(first_meaningful_line(" \n\t\n"), None);
+}
+
+#[test]
+fn maps_severity_to_dashboard_tone() {
+    assert_eq!(severity_to_tone("fatal"), "critical");
+    assert_eq!(severity_to_tone("error"), "critical");
+    assert_eq!(severity_to_tone("warn"), "warn");
+    assert_eq!(severity_to_tone("info"), "good");
+    assert_eq!(severity_to_tone("debug"), "good");
+    assert_eq!(severity_to_tone("trace"), "neutral");
+}
+
+#[test]
+fn allows_dashboard_access_for_matching_org_membership() {
+    let now = Utc::now();
+    let access = OrganizationAccess {
+        organization: Organization {
+            id: Uuid::new_v4(),
+            name: "Acme".to_string(),
+            clerk_org_id: Some("org_acme".to_string()),
+            created_at: now,
+            updated_at: now,
+        },
+        membership: Membership {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: OrganizationRole::Owner,
+            created_at: now,
+            updated_at: now,
+        },
+    };
+
+    ensure_user_can_access_clerk_org(&[access], "org_acme").expect("authorized");
+}
+
+#[test]
+fn rejects_dashboard_access_for_non_member_org() {
+    let now = Utc::now();
+    let access = OrganizationAccess {
+        organization: Organization {
+            id: Uuid::new_v4(),
+            name: "Acme".to_string(),
+            clerk_org_id: Some("org_acme".to_string()),
+            created_at: now,
+            updated_at: now,
+        },
+        membership: Membership {
+            id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            role: OrganizationRole::Owner,
+            created_at: now,
+            updated_at: now,
+        },
+    };
+
+    let error =
+        ensure_user_can_access_clerk_org(&[access], "org_other").expect_err("missing membership");
+
+    assert_eq!(
+        error.to_string(),
+        "validation failed: authenticated user is not a member of organization org_other"
     );
 }

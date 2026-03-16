@@ -994,56 +994,30 @@ impl Repository {
         .collect()
     }
 
-    pub async fn list_bugs(&self, clerk_org_id: Option<&str>) -> AppResult<Vec<BugListRow>> {
-        match clerk_org_id {
-            Some(org_id) => {
-                sqlx::query_as::<_, BugListRow>(
-                    "SELECT b.id, b.account_id, b.agent_id, b.language, b.severity, b.stacktrace_hash, b.normalized_stacktrace, b.latest_stacktrace, b.first_seen_at, b.last_seen_at, b.occurrence_count, a.name AS account_name, ag.name AS agent_name, t.status AS ticket_status, t.provider AS ticket_provider, COALESCE((SELECT ne.status FROM notification_events ne WHERE ne.bug_id = b.id ORDER BY ne.occurred_at DESC LIMIT 1), 'none') AS notification_status FROM bugs b JOIN accounts a ON a.id = b.account_id JOIN agents ag ON ag.id = b.agent_id LEFT JOIN tickets t ON t.bug_id = b.id WHERE a.organization_id IN (SELECT id FROM organizations WHERE clerk_org_id = $1) ORDER BY b.last_seen_at DESC",
-                )
-                .bind(org_id)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(Into::into)
-            }
-            None => {
-                sqlx::query_as::<_, BugListRow>(
-                    "SELECT b.id, b.account_id, b.agent_id, b.language, b.severity, b.stacktrace_hash, b.normalized_stacktrace, b.latest_stacktrace, b.first_seen_at, b.last_seen_at, b.occurrence_count, a.name AS account_name, ag.name AS agent_name, t.status AS ticket_status, t.provider AS ticket_provider, COALESCE((SELECT ne.status FROM notification_events ne WHERE ne.bug_id = b.id ORDER BY ne.occurred_at DESC LIMIT 1), 'none') AS notification_status FROM bugs b JOIN accounts a ON a.id = b.account_id JOIN agents ag ON ag.id = b.agent_id LEFT JOIN tickets t ON t.bug_id = b.id ORDER BY b.last_seen_at DESC",
-                )
-                .fetch_all(&self.pool)
-                .await
-                .map_err(Into::into)
-            }
-        }
+    pub async fn list_bugs(&self, clerk_org_id: &str) -> AppResult<Vec<BugListRow>> {
+        sqlx::query_as::<_, BugListRow>(
+            "SELECT b.id, b.account_id, b.agent_id, b.language, b.severity, b.stacktrace_hash, b.normalized_stacktrace, b.latest_stacktrace, b.first_seen_at, b.last_seen_at, b.occurrence_count::BIGINT AS occurrence_count, a.name AS account_name, ag.name AS agent_name, t.status AS ticket_status, t.provider AS ticket_provider, COALESCE((SELECT ne.status FROM notification_events ne WHERE ne.bug_id = b.id ORDER BY ne.occurred_at DESC LIMIT 1), 'none') AS notification_status FROM bugs b JOIN accounts a ON a.id = b.account_id JOIN agents ag ON ag.id = b.agent_id LEFT JOIN tickets t ON t.bug_id = b.id WHERE a.organization_id IN (SELECT id FROM organizations WHERE clerk_org_id = $1) ORDER BY b.last_seen_at DESC",
+        )
+        .bind(clerk_org_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
     }
 
     pub async fn find_bug_by_id_scoped(
         &self,
         bug_id: Uuid,
-        clerk_org_id: Option<&str>,
+        clerk_org_id: &str,
     ) -> AppResult<Option<Bug>> {
-        match clerk_org_id {
-            Some(org_id) => {
-                sqlx::query_as::<_, BugRow>(
-                    "SELECT b.id, b.account_id, b.agent_id, b.language, b.severity, b.stacktrace_hash, b.normalized_stacktrace, b.latest_stacktrace, b.first_seen_at, b.last_seen_at, b.occurrence_count FROM bugs b JOIN accounts a ON a.id = b.account_id WHERE b.id = $1 AND a.organization_id IN (SELECT id FROM organizations WHERE clerk_org_id = $2)",
-                )
-                .bind(bug_id.to_string())
-                .bind(org_id)
-                .fetch_optional(&self.pool)
-                .await?
-                .map(TryInto::try_into)
-                .transpose()
-            }
-            None => {
-                sqlx::query_as::<_, BugRow>(
-                    "SELECT id, account_id, agent_id, language, severity, stacktrace_hash, normalized_stacktrace, latest_stacktrace, first_seen_at, last_seen_at, occurrence_count FROM bugs WHERE id = $1",
-                )
-                .bind(bug_id.to_string())
-                .fetch_optional(&self.pool)
-                .await?
-                .map(TryInto::try_into)
-                .transpose()
-            }
-        }
+        sqlx::query_as::<_, BugRow>(
+            "SELECT b.id, b.account_id, b.agent_id, b.language, b.severity, b.stacktrace_hash, b.normalized_stacktrace, b.latest_stacktrace, b.first_seen_at, b.last_seen_at, b.occurrence_count FROM bugs b JOIN accounts a ON a.id = b.account_id WHERE b.id = $1 AND a.organization_id IN (SELECT id FROM organizations WHERE clerk_org_id = $2)",
+        )
+        .bind(bug_id.to_string())
+        .bind(clerk_org_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
     }
 
     pub async fn find_account_by_id(&self, account_id: Uuid) -> AppResult<Option<Account>> {
@@ -1838,7 +1812,7 @@ pub struct BugListRow {
     pub latest_stacktrace: String,
     pub first_seen_at: String,
     pub last_seen_at: String,
-    pub occurrence_count: i32,
+    pub occurrence_count: i64,
     pub account_name: String,
     pub agent_name: String,
     pub ticket_status: Option<String>,
