@@ -65,6 +65,7 @@ impl FromStr for Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketProvider {
+    None,
     Jira,
     Github,
     Linear,
@@ -74,6 +75,7 @@ pub enum TicketProvider {
 impl fmt::Display for TicketProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
+            Self::None => "none",
             Self::Jira => "jira",
             Self::Github => "github",
             Self::Linear => "linear",
@@ -88,6 +90,7 @@ impl FromStr for TicketProvider {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "none" | "" => Ok(Self::None),
             "jira" => Ok(Self::Jira),
             "github" => Ok(Self::Github),
             "linear" => Ok(Self::Linear),
@@ -102,6 +105,7 @@ impl FromStr for TicketProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationProvider {
+    None,
     Slack,
     Teams,
     Resend,
@@ -110,6 +114,7 @@ pub enum NotificationProvider {
 impl fmt::Display for NotificationProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
+            Self::None => "none",
             Self::Slack => "slack",
             Self::Teams => "teams",
             Self::Resend => "resend",
@@ -123,6 +128,7 @@ impl FromStr for NotificationProvider {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "none" | "" => Ok(Self::None),
             "slack" => Ok(Self::Slack),
             "teams" => Ok(Self::Teams),
             "resend" => Ok(Self::Resend),
