@@ -276,6 +276,7 @@ impl FromStr for TicketPriority {
 pub struct Organization {
     pub id: Uuid,
     pub name: String,
+    pub clerk_org_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -283,7 +284,8 @@ pub struct Organization {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
-    pub email: String,
+    pub clerk_user_id: String,
+    pub email: Option<String>,
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -484,7 +486,8 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrganizationRequest {
     pub name: String,
-    pub owner_email: String,
+    pub clerk_org_id: Option<String>,
+    pub owner_clerk_user_id: String,
     pub owner_name: String,
 }
 
@@ -495,9 +498,9 @@ impl CreateOrganizationRequest {
                 "organization name cannot be empty".to_string(),
             ));
         }
-        if normalize_email(&self.owner_email).is_none() {
+        if self.owner_clerk_user_id.trim().is_empty() {
             return Err(AppError::Validation(
-                "owner_email must be a valid email".to_string(),
+                "owner_clerk_user_id cannot be empty".to_string(),
             ));
         }
         if self.owner_name.trim().is_empty() {
@@ -511,16 +514,16 @@ impl CreateOrganizationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddOrganizationMemberRequest {
-    pub email: String,
+    pub clerk_user_id: String,
     pub name: String,
     pub role: OrganizationRole,
 }
 
 impl AddOrganizationMemberRequest {
     pub fn validate(&self) -> AppResult<()> {
-        if normalize_email(&self.email).is_none() {
+        if self.clerk_user_id.trim().is_empty() {
             return Err(AppError::Validation(
-                "email must be a valid email".to_string(),
+                "clerk_user_id cannot be empty".to_string(),
             ));
         }
         if self.name.trim().is_empty() {

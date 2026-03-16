@@ -7,7 +7,7 @@ use crate::domain::{
 };
 
 use super::{
-    AgentAuth, decode_go_bytes, extract_current_user_email, format_location, map_go_bug_payload,
+    AgentAuth, decode_go_bytes, extract_current_clerk_user_id, format_location, map_go_bug_payload,
     map_go_log_payload,
 };
 
@@ -210,24 +210,24 @@ fn preserves_canonical_log_payload_fields() {
 }
 
 #[test]
-fn extracts_current_user_email_header() {
+fn extracts_current_clerk_user_id_header() {
     let mut headers = HeaderMap::new();
     headers.insert(
-        "X-User-Email",
-        HeaderValue::from_static("owner@example.com"),
+        "X-Clerk-User-Id",
+        HeaderValue::from_static("user_3Ax62HMHNfbC2gyvCzBOMfB8tdb"),
     );
 
-    let email = extract_current_user_email(&headers).expect("email");
+    let user_id = extract_current_clerk_user_id(&headers).expect("clerk user id");
 
-    assert_eq!(email, "owner@example.com");
+    assert_eq!(user_id, "user_3Ax62HMHNfbC2gyvCzBOMfB8tdb");
 }
 
 #[test]
-fn requires_current_user_email_header() {
-    let error = extract_current_user_email(&HeaderMap::new()).expect_err("missing header");
+fn requires_current_clerk_user_id_header() {
+    let error = extract_current_clerk_user_id(&HeaderMap::new()).expect_err("missing header");
 
     assert_eq!(
         error.to_string(),
-        "validation failed: missing X-User-Email header"
+        "validation failed: missing X-Clerk-User-Id header"
     );
 }

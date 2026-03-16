@@ -87,14 +87,15 @@ async fn manages_organization_memberships() {
     let organization = repository
         .create_organization(CreateOrganizationRequest {
             name: "Acme".to_string(),
-            owner_email: "owner@acme.test".to_string(),
+            clerk_org_id: Some("org_test_acme".to_string()),
+            owner_clerk_user_id: "user_owner_test".to_string(),
             owner_name: "Owner".to_string(),
         })
         .await
         .expect("organization");
 
     let organizations = repository
-        .list_organizations_for_user("owner@acme.test")
+        .list_organizations_for_user("user_owner_test")
         .await
         .expect("organizations");
     assert_eq!(organizations.len(), 1);
@@ -107,20 +108,20 @@ async fn manages_organization_memberships() {
     let membership = repository
         .add_organization_member(
             organization.organization.id,
-            "owner@acme.test",
+            "user_owner_test",
             AddOrganizationMemberRequest {
-                email: "member@acme.test".to_string(),
+                clerk_user_id: "user_member_test".to_string(),
                 name: "Member".to_string(),
                 role: OrganizationRole::Member,
             },
         )
         .await
         .expect("membership");
-    assert_eq!(membership.user.email, "member@acme.test");
+    assert_eq!(membership.user.clerk_user_id, "user_member_test");
     assert_eq!(membership.membership.role, OrganizationRole::Member);
 
     let memberships = repository
-        .list_organization_memberships(organization.organization.id, "member@acme.test")
+        .list_organization_memberships(organization.organization.id, "user_member_test")
         .await
         .expect("memberships");
     assert_eq!(memberships.len(), 2);
@@ -129,7 +130,7 @@ async fn manages_organization_memberships() {
         .update_organization_membership(
             organization.organization.id,
             membership.membership.id,
-            "owner@acme.test",
+            "user_owner_test",
             UpdateOrganizationMembershipRequest {
                 role: OrganizationRole::Admin,
             },
