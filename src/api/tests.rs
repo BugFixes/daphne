@@ -22,7 +22,9 @@ mod rbac_integration {
     use serial_test::serial;
     use tower::ServiceExt;
 
-    use crate::domain::{AddOrganizationMemberRequest, CreateOrganizationRequest, OrganizationRole};
+    use crate::domain::{
+        AddOrganizationMemberRequest, CreateOrganizationRequest, OrganizationRole,
+    };
     use crate::test_support::{build_test_app, reset_database};
 
     async fn seed_org_with_member(
