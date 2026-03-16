@@ -291,12 +291,24 @@ impl Repository {
             ));
         }
 
+        let mut tx = self.pool.begin().await?;
+
+        // Lock all admin rows for this org first so concurrent downgrade attempts
+        // serialize against each other, preventing the TOCTOU race where two requests
+        // each see N admins > 0 before either update commits.
+        sqlx::query(
+            "SELECT id FROM memberships WHERE organization_id = $1 AND role = 'admin' FOR UPDATE",
+        )
+        .bind(organization_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
         let record = sqlx::query_as::<_, MembershipRecordRow>(
             "SELECT m.id AS membership_id, m.organization_id AS membership_organization_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at, u.clerk_user_id AS user_clerk_user_id, u.email AS user_email, u.name AS user_name, u.created_at AS user_created_at, u.updated_at AS user_updated_at FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.organization_id = $1 AND m.user_id = $2",
         )
         .bind(organization_id.to_string())
         .bind(user_id.to_string())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?
         .ok_or_else(|| {
             AppError::NotFound(format!(
@@ -319,7 +331,7 @@ impl Repository {
             )
             .bind(organization_id.to_string())
             .bind(user_id.to_string())
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await?;
             if remaining_admins == 0 {
                 return Err(AppError::Validation(
@@ -336,8 +348,10 @@ impl Repository {
         .bind(now.to_rfc3339())
         .bind(organization_id.to_string())
         .bind(user_id.to_string())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+
+        tx.commit().await?;
 
         Ok(MembershipRecord {
             membership: Membership {
