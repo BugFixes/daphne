@@ -114,6 +114,7 @@ pub fn build_repeat_comment(when: chrono::DateTime<chrono::Utc>) -> String {
 
 fn build_stub_remote_ticket(provider: TicketProvider, bug_id: uuid::Uuid) -> RemoteTicket {
     let prefix = match provider {
+        TicketProvider::None => "NONE",
         TicketProvider::Jira => "JIRA",
         TicketProvider::Github => "GH",
         TicketProvider::Linear => "LIN",

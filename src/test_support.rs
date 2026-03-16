@@ -1,11 +1,22 @@
-use std::{collections::HashSet, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
+use axum::Router;
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use tokio::sync::OnceCell;
 
-use crate::config::Config;
+use crate::{
+    ai::AiRegistry,
+    api,
+    config::Config,
+    feature_flags::build_feature_flags,
+    notifications::NotificationRegistry,
+    policy::build_policy_engine,
+    repository::Repository,
+    service::{IntakeService, IntakeServiceSettings},
+    ticketing::TicketingRegistry,
+};
 
 static TEST_DATABASE_URL: OnceCell<String> = OnceCell::const_new();
 
@@ -25,6 +36,30 @@ pub(crate) async fn test_config_with_disabled_features(
         flagsgg_environment_id: None,
         disabled_features,
     }
+}
+
+pub(crate) async fn build_test_app() -> (Router, Arc<Repository>) {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Arc::new(Repository::connect(&config).await.expect("repository"));
+    let ticketing = Arc::new(TicketingRegistry::default());
+    let notifications = Arc::new(NotificationRegistry::default());
+    let ai = Arc::new(AiRegistry::default());
+    let feature_flags = build_feature_flags(&config).expect("feature flags");
+    let policy_engine = build_policy_engine(&config).expect("policy engine");
+    let intake_service = Arc::new(IntakeService::new(
+        repository.clone(),
+        ticketing,
+        notifications,
+        ai,
+        feature_flags,
+        policy_engine,
+        IntakeServiceSettings {
+            notification_cooldown_minutes: 0,
+            log_retention_days: 30,
+        },
+    ));
+    let app = api::router(repository.clone(), intake_service);
+    (app, repository)
 }
 
 pub(crate) async fn reset_database() {

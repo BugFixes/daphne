@@ -65,6 +65,7 @@ impl FromStr for Severity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketProvider {
+    None,
     Jira,
     Github,
     Linear,
@@ -74,6 +75,7 @@ pub enum TicketProvider {
 impl fmt::Display for TicketProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
+            Self::None => "none",
             Self::Jira => "jira",
             Self::Github => "github",
             Self::Linear => "linear",
@@ -88,6 +90,7 @@ impl FromStr for TicketProvider {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "none" | "" => Ok(Self::None),
             "jira" => Ok(Self::Jira),
             "github" => Ok(Self::Github),
             "linear" => Ok(Self::Linear),
@@ -102,6 +105,7 @@ impl FromStr for TicketProvider {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationProvider {
+    None,
     Slack,
     Teams,
     Resend,
@@ -110,6 +114,7 @@ pub enum NotificationProvider {
 impl fmt::Display for NotificationProvider {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
+            Self::None => "none",
             Self::Slack => "slack",
             Self::Teams => "teams",
             Self::Resend => "resend",
@@ -123,6 +128,7 @@ impl FromStr for NotificationProvider {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
+            "none" | "" => Ok(Self::None),
             "slack" => Ok(Self::Slack),
             "teams" => Ok(Self::Teams),
             "resend" => Ok(Self::Resend),
@@ -179,6 +185,32 @@ impl OrganizationRole {
     pub fn can_manage_memberships(self) -> bool {
         matches!(self, Self::Owner | Self::Admin)
     }
+
+    pub fn has_permission(self, permission: Permission) -> bool {
+        match self {
+            Self::Owner => true,
+            Self::Admin => matches!(
+                permission,
+                Permission::ReadBugs
+                    | Permission::WriteBugs
+                    | Permission::ManageAgents
+                    | Permission::ManageProviders
+                    | Permission::ManageMembers
+            ),
+            Self::Member => matches!(permission, Permission::ReadBugs),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Permission {
+    ReadBugs,
+    WriteBugs,
+    ManageAgents,
+    ManageProviders,
+    ManageMembers,
+    ManageOrganization,
 }
 
 impl fmt::Display for OrganizationRole {
@@ -276,6 +308,7 @@ impl FromStr for TicketPriority {
 pub struct Organization {
     pub id: Uuid,
     pub name: String,
+    pub clerk_org_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -283,7 +316,8 @@ pub struct Organization {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
-    pub email: String,
+    pub clerk_user_id: String,
+    pub email: Option<String>,
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -484,7 +518,8 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrganizationRequest {
     pub name: String,
-    pub owner_email: String,
+    pub clerk_org_id: Option<String>,
+    pub owner_clerk_user_id: String,
     pub owner_name: String,
 }
 
@@ -495,9 +530,9 @@ impl CreateOrganizationRequest {
                 "organization name cannot be empty".to_string(),
             ));
         }
-        if normalize_email(&self.owner_email).is_none() {
+        if self.owner_clerk_user_id.trim().is_empty() {
             return Err(AppError::Validation(
-                "owner_email must be a valid email".to_string(),
+                "owner_clerk_user_id cannot be empty".to_string(),
             ));
         }
         if self.owner_name.trim().is_empty() {
@@ -511,16 +546,16 @@ impl CreateOrganizationRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddOrganizationMemberRequest {
-    pub email: String,
+    pub clerk_user_id: String,
     pub name: String,
     pub role: OrganizationRole,
 }
 
 impl AddOrganizationMemberRequest {
     pub fn validate(&self) -> AppResult<()> {
-        if normalize_email(&self.email).is_none() {
+        if self.clerk_user_id.trim().is_empty() {
             return Err(AppError::Validation(
-                "email must be a valid email".to_string(),
+                "clerk_user_id cannot be empty".to_string(),
             ));
         }
         if self.name.trim().is_empty() {
@@ -916,4 +951,67 @@ pub struct IntakeOutcome {
     pub ticket: Option<Ticket>,
     pub ai_recommendation: Option<String>,
     pub notification: NotificationOutcome,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{OrganizationRole, Permission};
+
+    #[test]
+    fn owner_has_all_permissions() {
+        let all = [
+            Permission::ReadBugs,
+            Permission::WriteBugs,
+            Permission::ManageAgents,
+            Permission::ManageProviders,
+            Permission::ManageMembers,
+            Permission::ManageOrganization,
+        ];
+        for perm in all {
+            assert!(
+                OrganizationRole::Owner.has_permission(perm),
+                "Owner should have {perm:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_has_operational_permissions_but_not_manage_organization() {
+        let allowed = [
+            Permission::ReadBugs,
+            Permission::WriteBugs,
+            Permission::ManageAgents,
+            Permission::ManageProviders,
+            Permission::ManageMembers,
+        ];
+        for perm in allowed {
+            assert!(
+                OrganizationRole::Admin.has_permission(perm),
+                "Admin should have {perm:?}"
+            );
+        }
+        assert!(
+            !OrganizationRole::Admin.has_permission(Permission::ManageOrganization),
+            "Admin should not have ManageOrganization"
+        );
+    }
+
+    #[test]
+    fn member_can_only_read_bugs() {
+        assert!(OrganizationRole::Member.has_permission(Permission::ReadBugs));
+
+        let denied = [
+            Permission::WriteBugs,
+            Permission::ManageAgents,
+            Permission::ManageProviders,
+            Permission::ManageMembers,
+            Permission::ManageOrganization,
+        ];
+        for perm in denied {
+            assert!(
+                !OrganizationRole::Member.has_permission(perm),
+                "Member should not have {perm:?}"
+            );
+        }
+    }
 }
