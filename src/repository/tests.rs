@@ -5,9 +5,10 @@ use serial_test::serial;
 
 use crate::{
     domain::{
-        AccountProviderKind, AddOrganizationMemberRequest, CreateAccountRequest,
-        CreateAgentRequest, CreateOrganizationRequest, NotificationProvider, OrganizationRole,
-        Severity, TicketAction, TicketProvider, UpdateOrganizationMembershipRequest,
+        AccountProviderKind, AddOrganizationMemberRequest, ApiKeyScope, ApiKeyType,
+        CreateAccountRequest, CreateAgentRequest, CreateApiKeyRequest, CreateOrganizationRequest,
+        NotificationProvider, OrganizationRole, Severity, TicketAction, TicketProvider,
+        UpdateOrganizationMembershipRequest,
     },
     test_support::{reset_database, test_config_with_disabled_features},
 };
@@ -315,4 +316,227 @@ async fn scopes_dashboard_repository_queries_to_clerk_org() {
         .expect("notifications");
     assert_eq!(notifications.len(), 1);
     assert_eq!(notifications[0].message, "Acme bug notification");
+}
+
+#[tokio::test]
+#[serial]
+async fn creates_and_lists_api_keys() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let org = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "KeyOrg".to_string(),
+            clerk_org_id: Some("org_key_test".to_string()),
+            owner_clerk_user_id: "user_key_owner".to_string(),
+            owner_name: "Owner".to_string(),
+        })
+        .await
+        .expect("org");
+
+    let account = repository
+        .create_account(CreateAccountRequest {
+            organization_id: Some(org.organization.id),
+            name: "KeyAccount".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::None,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::None,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: false,
+            ai_api_key: None,
+            notify_min_level: Severity::Error,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 3,
+        })
+        .await
+        .expect("account");
+
+    // Create a dev key
+    let dev_key = repository
+        .create_api_key(
+            org.organization.id,
+            Some("user_key_owner"),
+            CreateApiKeyRequest {
+                name: "My Dev Key".to_string(),
+                key_type: ApiKeyType::Dev,
+                scope: None,
+                account_id: Some(account.id),
+                environment: None,
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("dev key");
+    assert_eq!(dev_key.api_key.key_type, ApiKeyType::Dev);
+    assert_eq!(dev_key.api_key.scope, ApiKeyScope::Ingest);
+    assert!(!dev_key.api_secret.is_empty());
+
+    // Create a system key
+    let system_key = repository
+        .create_api_key(
+            org.organization.id,
+            None,
+            CreateApiKeyRequest {
+                name: "Prod Ingest".to_string(),
+                key_type: ApiKeyType::System,
+                scope: Some(ApiKeyScope::Ingest),
+                account_id: Some(account.id),
+                environment: Some("production".to_string()),
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("system key");
+    assert_eq!(system_key.api_key.key_type, ApiKeyType::System);
+    assert_eq!(system_key.api_key.scope, ApiKeyScope::Ingest);
+
+    // List for org returns both
+    let org_keys = repository
+        .list_api_keys_for_org(org.organization.id)
+        .await
+        .expect("org keys");
+    assert_eq!(org_keys.len(), 2);
+
+    // List for user returns only dev key
+    let user_keys = repository
+        .list_api_keys_for_user("user_key_owner")
+        .await
+        .expect("user keys");
+    assert_eq!(user_keys.len(), 1);
+    assert_eq!(user_keys[0].name, "My Dev Key");
+}
+
+#[tokio::test]
+#[serial]
+async fn revokes_api_key() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let org = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "RevokeOrg".to_string(),
+            clerk_org_id: Some("org_revoke_test".to_string()),
+            owner_clerk_user_id: "user_revoke_owner".to_string(),
+            owner_name: "Owner".to_string(),
+        })
+        .await
+        .expect("org");
+
+    let account = repository
+        .create_account(CreateAccountRequest {
+            organization_id: Some(org.organization.id),
+            name: "RevokeAccount".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::None,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::None,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: false,
+            ai_api_key: None,
+            notify_min_level: Severity::Error,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 3,
+        })
+        .await
+        .expect("account");
+
+    let key = repository
+        .create_api_key(
+            org.organization.id,
+            Some("user_revoke_owner"),
+            CreateApiKeyRequest {
+                name: "Revocable Key".to_string(),
+                key_type: ApiKeyType::Dev,
+                scope: None,
+                account_id: Some(account.id),
+                environment: None,
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("key");
+
+    let revoked = repository
+        .revoke_api_key(key.api_key.id, org.organization.id)
+        .await
+        .expect("revoke");
+    assert!(revoked.revoked_at.is_some());
+
+    // Should not appear in list
+    let keys = repository
+        .list_api_keys_for_org(org.organization.id)
+        .await
+        .expect("keys");
+    assert!(keys.is_empty());
+}
+
+#[tokio::test]
+#[serial]
+async fn finds_api_key_by_credentials() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let org = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "CredOrg".to_string(),
+            clerk_org_id: Some("org_cred_test".to_string()),
+            owner_clerk_user_id: "user_cred_owner".to_string(),
+            owner_name: "Owner".to_string(),
+        })
+        .await
+        .expect("org");
+
+    let account = repository
+        .create_account(CreateAccountRequest {
+            organization_id: Some(org.organization.id),
+            name: "CredAccount".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::None,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::None,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: false,
+            ai_api_key: None,
+            notify_min_level: Severity::Error,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 3,
+        })
+        .await
+        .expect("account");
+
+    let key = repository
+        .create_api_key(
+            org.organization.id,
+            Some("user_cred_owner"),
+            CreateApiKeyRequest {
+                name: "Ingest Key".to_string(),
+                key_type: ApiKeyType::Dev,
+                scope: None,
+                account_id: Some(account.id),
+                environment: None,
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("key");
+
+    // Valid credentials should find the key
+    let found = repository
+        .find_api_key_by_credentials(&key.api_key.api_key, &key.api_secret)
+        .await
+        .expect("found key");
+    assert_eq!(found.id, key.api_key.id);
+
+    // Wrong secret should not find the key
+    let not_found = repository
+        .find_api_key_by_credentials(&key.api_key.api_key, "wrong_secret")
+        .await;
+    assert!(not_found.is_err());
 }

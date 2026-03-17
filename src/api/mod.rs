@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::HeaderMap,
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Serialize;
@@ -14,10 +14,10 @@ use tower_http::cors::{Any, CorsLayer};
 use crate::{
     AppError, AppResult,
     domain::{
-        AddOrganizationMemberRequest, AuthenticatedStacktraceEventPayload, CreateAccountRequest,
-        CreateAgentRequest, CreateOrganizationRequest, GoBugPayload, GoLogPayload, LogEvent,
-        LogEventPayload, OrganizationAccess, Permission, Severity, StacktraceEvent,
-        StacktraceEventPayload, UpdateOrganizationMembershipRequest,
+        AddOrganizationMemberRequest, ApiKeyType, AuthenticatedStacktraceEventPayload,
+        CreateAccountRequest, CreateAgentRequest, CreateApiKeyRequest, CreateOrganizationRequest,
+        GoBugPayload, GoLogPayload, LogEvent, LogEventPayload, OrganizationAccess, Permission,
+        Severity, StacktraceEvent, StacktraceEventPayload, UpdateOrganizationMembershipRequest,
     },
     repository::Repository,
     service::IntakeService,
@@ -55,6 +55,11 @@ pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -
         )
         .route("/v1/accounts", post(create_account))
         .route("/v1/agents", post(create_agent))
+        .route(
+            "/v1/api-keys",
+            post(create_api_key_handler).get(list_api_keys_handler),
+        )
+        .route("/v1/api-keys/{key_id}", delete(revoke_api_key_handler))
         .route("/v1/events/stacktraces", post(ingest_stacktrace))
         .route("/v1/events/bugs", post(ingest_authenticated_stacktrace))
         .route("/v1/events/logs", post(ingest_log_event))
@@ -203,6 +208,133 @@ async fn create_agent(
     require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
     let agent = state.repository.create_agent(request).await?;
     Ok(Json(agent))
+}
+
+async fn create_api_key_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateApiKeyRequest>,
+) -> AppResult<Json<crate::domain::ApiKeyWithSecret>> {
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
+    let clerk_org_id = extract_required_clerk_org_id(&headers)?;
+
+    let organizations = state
+        .repository
+        .list_organizations_for_user(&clerk_user_id)
+        .await?;
+    ensure_user_can_access_clerk_org(&organizations, &clerk_org_id)?;
+
+    match request.key_type {
+        ApiKeyType::Dev => {
+            // Any org member can create dev keys for themselves
+        }
+        ApiKeyType::System => {
+            check_org_permission(&organizations, &clerk_org_id, Permission::ManageApiKeys)?;
+        }
+    }
+
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+
+    // For dev keys, verify the account belongs to this org
+    if let Some(account_id) = request.account_id {
+        let account = state.repository.find_account(account_id).await?;
+        if account.organization_id != org.id {
+            return Err(AppError::Forbidden(
+                "account does not belong to this organization".to_string(),
+            ));
+        }
+    }
+
+    let created_by = match request.key_type {
+        ApiKeyType::Dev => Some(clerk_user_id.as_str()),
+        ApiKeyType::System => None,
+    };
+
+    let api_key = state
+        .repository
+        .create_api_key(org.id, created_by, request)
+        .await?;
+    Ok(Json(api_key))
+}
+
+async fn list_api_keys_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<Vec<crate::domain::ApiKeyRecord>>> {
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
+    let clerk_org_id = extract_required_clerk_org_id(&headers)?;
+
+    let organizations = state
+        .repository
+        .list_organizations_for_user(&clerk_user_id)
+        .await?;
+    ensure_user_can_access_clerk_org(&organizations, &clerk_org_id)?;
+
+    // Always include user's own dev keys
+    let mut keys = state
+        .repository
+        .list_api_keys_for_user(&clerk_user_id)
+        .await?;
+
+    // Include system keys if user has ManageApiKeys permission
+    if check_org_permission(&organizations, &clerk_org_id, Permission::ManageApiKeys).is_ok() {
+        let org = state
+            .repository
+            .find_organization_by_clerk_id(&clerk_org_id)
+            .await?;
+        let org_keys = state.repository.list_api_keys_for_org(org.id).await?;
+        // Add system keys that aren't already in the user's dev key list
+        for key in org_keys {
+            if key.clerk_user_id.is_none() {
+                keys.push(key);
+            }
+        }
+    }
+
+    Ok(Json(keys))
+}
+
+async fn revoke_api_key_handler(
+    State(state): State<AppState>,
+    Path(key_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> AppResult<Json<crate::domain::ApiKeyRecord>> {
+    let clerk_user_id = extract_current_clerk_user_id(&headers)?;
+    let clerk_org_id = extract_required_clerk_org_id(&headers)?;
+
+    let organizations = state
+        .repository
+        .list_organizations_for_user(&clerk_user_id)
+        .await?;
+    ensure_user_can_access_clerk_org(&organizations, &clerk_org_id)?;
+
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+
+    // Revoke the key — will 404 if not found in this org
+    let revoked = state.repository.revoke_api_key(key_id, org.id).await?;
+
+    // If it's a system key, require ManageApiKeys permission
+    // If it's a dev key, only the owning user can revoke
+    match revoked.key_type {
+        ApiKeyType::System => {
+            check_org_permission(&organizations, &clerk_org_id, Permission::ManageApiKeys)?;
+        }
+        ApiKeyType::Dev => {
+            if revoked.clerk_user_id.as_deref() != Some(&clerk_user_id) {
+                return Err(AppError::Forbidden(
+                    "can only revoke your own dev keys".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(Json(revoked))
 }
 
 async fn ingest_stacktrace(
