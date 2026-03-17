@@ -889,6 +889,7 @@ fn owner_passes_all_permission_checks() {
         Permission::ManageProviders,
         Permission::ManageMembers,
         Permission::ManageOrganization,
+        Permission::ManageApiKeys,
     ] {
         check_org_permission(std::slice::from_ref(&access), "org_acme", perm)
             .unwrap_or_else(|_| panic!("Owner should pass {perm:?}"));
@@ -904,6 +905,7 @@ fn admin_passes_operational_permissions() {
         Permission::ManageAgents,
         Permission::ManageProviders,
         Permission::ManageMembers,
+        Permission::ManageApiKeys,
     ] {
         check_org_permission(std::slice::from_ref(&access), "org_acme", perm)
             .unwrap_or_else(|_| panic!("Admin should pass {perm:?}"));
@@ -934,6 +936,7 @@ fn member_blocked_from_write_and_management_permissions() {
         Permission::ManageProviders,
         Permission::ManageMembers,
         Permission::ManageOrganization,
+        Permission::ManageApiKeys,
     ] {
         check_org_permission(std::slice::from_ref(&access), "org_acme", perm)
             .expect_err(&format!("Member should be blocked from {perm:?}"));
@@ -949,4 +952,230 @@ fn non_member_gets_forbidden_not_validation_error() {
         err.to_string().contains("forbidden"),
         "expected forbidden, got: {err}"
     );
+}
+
+mod api_key_management {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::body::to_bytes;
+    use serial_test::serial;
+    use tower::ServiceExt;
+
+    use crate::domain::{
+        AddOrganizationMemberRequest, CreateAccountRequest, CreateOrganizationRequest,
+        NotificationProvider, OrganizationRole, Severity, TicketProvider,
+    };
+    use crate::test_support::{build_test_app, reset_database};
+
+    async fn seed_org_and_account(
+        repository: &crate::repository::Repository,
+        clerk_org_id: &str,
+        owner_clerk_user_id: &str,
+    ) -> (uuid::Uuid, uuid::Uuid) {
+        let org = repository
+            .create_organization(CreateOrganizationRequest {
+                name: "API Key Org".to_string(),
+                clerk_org_id: Some(clerk_org_id.to_string()),
+                owner_clerk_user_id: owner_clerk_user_id.to_string(),
+                owner_name: "Owner".to_string(),
+            })
+            .await
+            .expect("org");
+
+        let account = repository
+            .create_account(CreateAccountRequest {
+                organization_id: Some(org.organization.id),
+                name: "API Key Account".to_string(),
+                create_tickets: false,
+                ticket_provider: TicketProvider::None,
+                ticketing_api_key: None,
+                notification_provider: NotificationProvider::None,
+                notification_api_key: None,
+                ai_enabled: false,
+                use_managed_ai: false,
+                ai_api_key: None,
+                notify_min_level: Severity::Error,
+                rapid_occurrence_window_minutes: 30,
+                rapid_occurrence_threshold: 3,
+            })
+            .await
+            .expect("account");
+
+        (org.organization.id, account.id)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn member_can_create_dev_key() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, account_id) =
+            seed_org_and_account(&repository, "org_ak_dev", "user_ak_owner").await;
+        repository
+            .add_organization_member(
+                org_id,
+                "user_ak_owner",
+                AddOrganizationMemberRequest {
+                    clerk_user_id: "user_ak_member".to_string(),
+                    name: "Member".to_string(),
+                    role: OrganizationRole::Member,
+                },
+            )
+            .await
+            .expect("member");
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "name": "My Dev Key",
+            "key_type": "dev",
+            "account_id": account_id
+        }))
+        .expect("json");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/api-keys")
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_ak_member")
+            .header("X-Clerk-Org-Id", "org_ak_dev")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert!(json.get("api_secret").is_some());
+        assert_eq!(json["key_type"], "dev");
+        assert_eq!(json["scope"], "ingest");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn member_cannot_create_system_key() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, account_id) =
+            seed_org_and_account(&repository, "org_ak_sys", "user_ak_sys_owner").await;
+        repository
+            .add_organization_member(
+                org_id,
+                "user_ak_sys_owner",
+                AddOrganizationMemberRequest {
+                    clerk_user_id: "user_ak_sys_member".to_string(),
+                    name: "Member".to_string(),
+                    role: OrganizationRole::Member,
+                },
+            )
+            .await
+            .expect("member");
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "name": "System Key",
+            "key_type": "system",
+            "scope": "ingest",
+            "account_id": account_id
+        }))
+        .expect("json");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/api-keys")
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_ak_sys_member")
+            .header("X-Clerk-Org-Id", "org_ak_sys")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn admin_can_create_system_key() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, account_id) =
+            seed_org_and_account(&repository, "org_ak_admin_sys", "user_ak_admin_sys_owner").await;
+        repository
+            .add_organization_member(
+                org_id,
+                "user_ak_admin_sys_owner",
+                AddOrganizationMemberRequest {
+                    clerk_user_id: "user_ak_admin_sys".to_string(),
+                    name: "Admin".to_string(),
+                    role: OrganizationRole::Admin,
+                },
+            )
+            .await
+            .expect("admin");
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "name": "Prod Ingest",
+            "key_type": "system",
+            "scope": "ingest",
+            "account_id": account_id,
+            "environment": "production"
+        }))
+        .expect("json");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/api-keys")
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_ak_admin_sys")
+            .header("X-Clerk-Org-Id", "org_ak_admin_sys")
+            .body(Body::from(body))
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(json["key_type"], "system");
+        assert_eq!(json["scope"], "ingest");
+        assert_eq!(json["environment"], "production");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn admin_can_revoke_api_key() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        let (org_id, account_id) =
+            seed_org_and_account(&repository, "org_ak_revoke", "user_ak_revoke_owner").await;
+
+        let key = repository
+            .create_api_key(
+                org_id,
+                None,
+                crate::domain::CreateApiKeyRequest {
+                    name: "Revocable".to_string(),
+                    key_type: crate::domain::ApiKeyType::System,
+                    scope: Some(crate::domain::ApiKeyScope::Ingest),
+                    account_id: Some(account_id),
+                    environment: None,
+                    expires_at: None,
+                },
+            )
+            .await
+            .expect("key");
+
+        let request = Request::builder()
+            .method("DELETE")
+            .uri(format!("/v1/api-keys/{}", key.api_key.id))
+            .header("X-Clerk-User-Id", "user_ak_revoke_owner")
+            .header("X-Clerk-Org-Id", "org_ak_revoke")
+            .body(Body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }

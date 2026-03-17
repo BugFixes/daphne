@@ -10,8 +10,9 @@ use crate::{
     config::Config,
     domain::{
         Account, AccountProviderConfig, AccountProviderKind, AddOrganizationMemberRequest, Agent,
-        Bug, CreateAccountRequest, CreateAgentRequest, CreateOrganizationRequest, LogArchive,
-        LogRecord, Membership, MembershipRecord, NotificationEvent, NotificationEventStatus,
+        ApiKeyRecord, ApiKeyScope, ApiKeyType, ApiKeyWithSecret, Bug, CreateAccountRequest,
+        CreateAgentRequest, CreateApiKeyRequest, CreateOrganizationRequest, LogArchive, LogRecord,
+        Membership, MembershipRecord, NotificationEvent, NotificationEventStatus,
         NotificationProvider, NotificationRecord, Occurrence, Organization, OrganizationAccess,
         OrganizationRole, Severity, Ticket, TicketAction, TicketEvent, TicketPriority,
         TicketProvider, UpdateOrganizationMembershipRequest, User,
@@ -469,6 +470,146 @@ impl Repository {
         .await?;
 
         Ok(agent)
+    }
+
+    pub async fn create_api_key(
+        &self,
+        organization_id: Uuid,
+        clerk_user_id: Option<&str>,
+        request: CreateApiKeyRequest,
+    ) -> AppResult<ApiKeyWithSecret> {
+        request.validate()?;
+
+        if let Some(account_id) = request.account_id {
+            self.find_account(account_id).await?;
+        }
+
+        let now = Utc::now();
+        let scope = request.effective_scope();
+        let expires_at = request.capped_expires_at(now);
+        let api_secret = Uuid::new_v4().simple().to_string();
+
+        let record = ApiKeyRecord {
+            id: Uuid::new_v4(),
+            organization_id,
+            account_id: request.account_id,
+            key_type: request.key_type,
+            scope,
+            name: request.name,
+            api_key: Uuid::new_v4().simple().to_string(),
+            clerk_user_id: clerk_user_id.map(String::from),
+            environment: request.environment,
+            expires_at,
+            revoked_at: None,
+            last_used_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        sqlx::query(
+            "INSERT INTO api_keys (id, organization_id, account_id, key_type, scope, name, api_key, api_secret, clerk_user_id, environment, expires_at, revoked_at, last_used_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+        )
+        .bind(record.id.to_string())
+        .bind(record.organization_id.to_string())
+        .bind(record.account_id.map(|id| id.to_string()))
+        .bind(record.key_type.to_string())
+        .bind(record.scope.to_string())
+        .bind(record.name.clone())
+        .bind(record.api_key.clone())
+        .bind(&api_secret)
+        .bind(record.clerk_user_id.clone())
+        .bind(record.environment.clone())
+        .bind(record.expires_at.to_rfc3339())
+        .bind(record.revoked_at.map(|t| t.to_rfc3339()))
+        .bind(record.last_used_at.map(|t| t.to_rfc3339()))
+        .bind(record.created_at.to_rfc3339())
+        .bind(record.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(ApiKeyWithSecret {
+            api_key: record,
+            api_secret,
+        })
+    }
+
+    pub async fn list_api_keys_for_org(
+        &self,
+        organization_id: Uuid,
+    ) -> AppResult<Vec<ApiKeyRecord>> {
+        sqlx::query_as::<_, ApiKeyRow>(
+            "SELECT id, organization_id, account_id, key_type, scope, name, api_key, clerk_user_id, environment, expires_at, revoked_at, last_used_at, created_at, updated_at FROM api_keys WHERE organization_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC",
+        )
+        .bind(organization_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn list_api_keys_for_user(
+        &self,
+        clerk_user_id: &str,
+    ) -> AppResult<Vec<ApiKeyRecord>> {
+        sqlx::query_as::<_, ApiKeyRow>(
+            "SELECT id, organization_id, account_id, key_type, scope, name, api_key, clerk_user_id, environment, expires_at, revoked_at, last_used_at, created_at, updated_at FROM api_keys WHERE clerk_user_id = $1 AND revoked_at IS NULL ORDER BY created_at DESC",
+        )
+        .bind(clerk_user_id)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(TryInto::try_into)
+        .collect()
+    }
+
+    pub async fn revoke_api_key(
+        &self,
+        key_id: Uuid,
+        organization_id: Uuid,
+    ) -> AppResult<ApiKeyRecord> {
+        let now = Utc::now();
+        let row = sqlx::query_as::<_, ApiKeyRow>(
+            "UPDATE api_keys SET revoked_at = $1, updated_at = $1 WHERE id = $2 AND organization_id = $3 AND revoked_at IS NULL RETURNING id, organization_id, account_id, key_type, scope, name, api_key, clerk_user_id, environment, expires_at, revoked_at, last_used_at, created_at, updated_at",
+        )
+        .bind(now.to_rfc3339())
+        .bind(key_id.to_string())
+        .bind(organization_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("api key {key_id}")))?;
+
+        row.try_into()
+    }
+
+    pub async fn find_api_key_by_credentials(
+        &self,
+        api_key: &str,
+        api_secret: &str,
+    ) -> AppResult<ApiKeyRecord> {
+        let row = sqlx::query_as::<_, ApiKeyRow>(
+            "SELECT id, organization_id, account_id, key_type, scope, name, api_key, clerk_user_id, environment, expires_at, revoked_at, last_used_at, created_at, updated_at FROM api_keys WHERE api_key = $1 AND api_secret = $2 AND revoked_at IS NULL AND expires_at > $3 AND scope = $4",
+        )
+        .bind(api_key)
+        .bind(api_secret)
+        .bind(Utc::now().to_rfc3339())
+        .bind(ApiKeyScope::Ingest.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("api key for provided credentials".to_string()))?;
+
+        row.try_into()
+    }
+
+    pub async fn update_api_key_last_used(&self, api_key: &str) -> AppResult<()> {
+        sqlx::query(
+            "UPDATE api_keys SET last_used_at = $1 WHERE api_key = $2 AND revoked_at IS NULL",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(api_key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn find_account(&self, account_id: Uuid) -> AppResult<Account> {
@@ -1650,6 +1791,55 @@ impl TryFrom<AgentRow> for Agent {
             name: row.name,
             api_key: row.api_key,
             api_secret: row.api_secret,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct ApiKeyRow {
+    id: String,
+    organization_id: String,
+    account_id: Option<String>,
+    key_type: String,
+    scope: String,
+    name: String,
+    api_key: String,
+    clerk_user_id: Option<String>,
+    environment: Option<String>,
+    expires_at: String,
+    revoked_at: Option<String>,
+    last_used_at: Option<String>,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<ApiKeyRow> for ApiKeyRecord {
+    type Error = AppError;
+
+    fn try_from(row: ApiKeyRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            organization_id: Uuid::parse_str(&row.organization_id)?,
+            account_id: row.account_id.as_deref().map(Uuid::parse_str).transpose()?,
+            key_type: ApiKeyType::from_str(&row.key_type)?,
+            scope: ApiKeyScope::from_str(&row.scope)?,
+            name: row.name,
+            api_key: row.api_key,
+            clerk_user_id: row.clerk_user_id,
+            environment: row.environment,
+            expires_at: parse_rfc3339_utc(&row.expires_at)?,
+            revoked_at: row
+                .revoked_at
+                .as_deref()
+                .map(parse_rfc3339_utc)
+                .transpose()?,
+            last_used_at: row
+                .last_used_at
+                .as_deref()
+                .map(parse_rfc3339_utc)
+                .transpose()?,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
         })
     }
 }

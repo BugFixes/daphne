@@ -55,6 +55,11 @@ static RUSTC_SOURCE_PATH_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(/rustc/)[0-9a-fA-F]{40}(/)").expect("valid rustc source path regex")
 });
 
+struct ResolvedAuth {
+    account_id: uuid::Uuid,
+    agent_id: uuid::Uuid,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct IntakeServiceSettings {
     pub notification_cooldown_minutes: i64,
@@ -86,15 +91,10 @@ impl IntakeService {
     pub async fn ingest(&self, event: StacktraceEvent) -> AppResult<crate::domain::IntakeOutcome> {
         event.validate()?;
 
-        let agent = match event.agent_secret.as_deref() {
-            Some(agent_secret) => {
-                self.repository
-                    .find_agent_by_credentials(&event.agent_key, agent_secret)
-                    .await?
-            }
-            None => self.repository.find_agent_by_key(&event.agent_key).await?,
-        };
-        let account = self.repository.find_account(agent.account_id).await?;
+        let resolved = self
+            .resolve_ingest_auth(&event.agent_key, event.agent_secret.as_deref())
+            .await?;
+        let account = self.repository.find_account(resolved.account_id).await?;
         let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
         let normalized_stacktrace = normalize_stacktrace(&event.language, &event.stacktrace);
         let stacktrace_hash = hash_stacktrace(&normalized_stacktrace);
@@ -116,7 +116,7 @@ impl IntakeService {
         } else {
             self.handle_new_bug(
                 account,
-                agent.id,
+                resolved.agent_id,
                 event,
                 normalized_stacktrace,
                 stacktrace_hash,
@@ -132,20 +132,15 @@ impl IntakeService {
     ) -> AppResult<crate::domain::LogIntakeOutcome> {
         event.validate()?;
 
-        let agent = match event.agent_secret.as_deref() {
-            Some(agent_secret) => {
-                self.repository
-                    .find_agent_by_credentials(&event.agent_key, agent_secret)
-                    .await?
-            }
-            None => self.repository.find_agent_by_key(&event.agent_key).await?,
-        };
+        let resolved = self
+            .resolve_ingest_auth(&event.agent_key, event.agent_secret.as_deref())
+            .await?;
         let occurred_at = event.occurred_at.unwrap_or_else(Utc::now);
         let log = self
             .repository
             .create_log(crate::repository::CreateLogRecord {
-                account_id: agent.account_id,
-                agent_id: agent.id,
+                account_id: resolved.account_id,
+                agent_id: resolved.agent_id,
                 language: &event.language,
                 level: event.level,
                 message: &event.message,
@@ -172,6 +167,59 @@ impl IntakeService {
         self.repository
             .archive_logs_before(cutoff_before, now)
             .await
+    }
+
+    async fn resolve_ingest_auth(
+        &self,
+        api_key: &str,
+        api_secret: Option<&str>,
+    ) -> AppResult<ResolvedAuth> {
+        // Try agent credentials first
+        let agent_result = match api_secret {
+            Some(secret) => {
+                self.repository
+                    .find_agent_by_credentials(api_key, secret)
+                    .await
+            }
+            None => self.repository.find_agent_by_key(api_key).await,
+        };
+
+        if let Ok(agent) = agent_result {
+            return Ok(ResolvedAuth {
+                account_id: agent.account_id,
+                agent_id: agent.id,
+            });
+        }
+
+        // Fall back to API key credentials
+        if let Some(secret) = api_secret {
+            let api_key_record = self
+                .repository
+                .find_api_key_by_credentials(api_key, secret)
+                .await?;
+
+            // Update last_used_at in the background
+            let repo = self.repository.clone();
+            let key = api_key.to_string();
+            tokio::spawn(async move {
+                let _ = repo.update_api_key_last_used(&key).await;
+            });
+
+            if let Some(account_id) = api_key_record.account_id {
+                return Ok(ResolvedAuth {
+                    account_id,
+                    agent_id: api_key_record.id,
+                });
+            }
+
+            return Err(crate::AppError::Validation(
+                "system ingest key has no account_id".to_string(),
+            ));
+        }
+
+        Err(crate::AppError::NotFound(
+            "agent for provided key".to_string(),
+        ))
     }
 
     async fn handle_new_bug(

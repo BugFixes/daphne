@@ -196,6 +196,7 @@ impl OrganizationRole {
                     | Permission::ManageAgents
                     | Permission::ManageProviders
                     | Permission::ManageMembers
+                    | Permission::ManageApiKeys
             ),
             Self::Member => matches!(permission, Permission::ReadBugs),
         }
@@ -211,6 +212,7 @@ pub enum Permission {
     ManageProviders,
     ManageMembers,
     ManageOrganization,
+    ManageApiKeys,
 }
 
 impl fmt::Display for OrganizationRole {
@@ -382,6 +384,152 @@ pub struct Agent {
     pub name: String,
     pub api_key: String,
     pub api_secret: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyType {
+    Dev,
+    System,
+}
+
+impl fmt::Display for ApiKeyType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Dev => "dev",
+            Self::System => "system",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for ApiKeyType {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "dev" => Ok(Self::Dev),
+            "system" => Ok(Self::System),
+            _ => Err(AppError::Validation(format!(
+                "unsupported api key type: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyScope {
+    Ingest,
+    Read,
+}
+
+impl fmt::Display for ApiKeyScope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Ingest => "ingest",
+            Self::Read => "read",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for ApiKeyScope {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "ingest" => Ok(Self::Ingest),
+            "read" => Ok(Self::Read),
+            _ => Err(AppError::Validation(format!(
+                "unsupported api key scope: {value}"
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyRecord {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub account_id: Option<Uuid>,
+    pub key_type: ApiKeyType,
+    pub scope: ApiKeyScope,
+    pub name: String,
+    pub api_key: String,
+    pub clerk_user_id: Option<String>,
+    pub environment: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyWithSecret {
+    #[serde(flatten)]
+    pub api_key: ApiKeyRecord,
+    pub api_secret: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateApiKeyRequest {
+    pub name: String,
+    pub key_type: ApiKeyType,
+    #[serde(default)]
+    pub scope: Option<ApiKeyScope>,
+    #[serde(default)]
+    pub account_id: Option<Uuid>,
+    #[serde(default)]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl CreateApiKeyRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "api key name cannot be empty".to_string(),
+            ));
+        }
+        match self.key_type {
+            ApiKeyType::Dev => {
+                if self.account_id.is_none() {
+                    return Err(AppError::Validation(
+                        "account_id is required for dev keys".to_string(),
+                    ));
+                }
+            }
+            ApiKeyType::System => {
+                if self.scope.is_none() {
+                    return Err(AppError::Validation(
+                        "scope is required for system keys".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn effective_scope(&self) -> ApiKeyScope {
+        match self.key_type {
+            ApiKeyType::Dev => ApiKeyScope::Ingest,
+            ApiKeyType::System => self.scope.unwrap_or(ApiKeyScope::Ingest),
+        }
+    }
+
+    pub fn capped_expires_at(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        let max = match self.key_type {
+            ApiKeyType::Dev => now + chrono::Duration::days(30),
+            ApiKeyType::System => now + chrono::Duration::days(365),
+        };
+        match self.expires_at {
+            Some(requested) if requested <= max => requested,
+            _ => max,
+        }
+    }
 }
 
 /// Stored deduplicated bug record.
@@ -966,6 +1114,7 @@ mod tests {
             Permission::ManageProviders,
             Permission::ManageMembers,
             Permission::ManageOrganization,
+            Permission::ManageApiKeys,
         ];
         for perm in all {
             assert!(
@@ -983,6 +1132,7 @@ mod tests {
             Permission::ManageAgents,
             Permission::ManageProviders,
             Permission::ManageMembers,
+            Permission::ManageApiKeys,
         ];
         for perm in allowed {
             assert!(
@@ -1006,6 +1156,7 @@ mod tests {
             Permission::ManageProviders,
             Permission::ManageMembers,
             Permission::ManageOrganization,
+            Permission::ManageApiKeys,
         ];
         for perm in denied {
             assert!(
