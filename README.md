@@ -20,7 +20,10 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 - `POST /v1/organizations/{organization_id}/memberships` adds a member to an organization.
 - `GET /v1/organizations/{organization_id}/memberships` lists memberships for an organization.
 - `PATCH /v1/organizations/{organization_id}/memberships/{membership_id}` updates a membership role.
-- `POST /v1/accounts` creates an account with ticketing and notification policy.
+- `POST /v1/projects` creates a project inside the current organization.
+- `POST /v1/projects/{project_id}/subprojects` creates a subproject inside a project.
+- `POST /v1/subprojects/{subproject_id}/environments` creates an environment and its backing account.
+- `POST /v1/accounts` creates an account with ticketing and notification policy. This remains for compatibility.
 - `POST /v1/agents` creates an agent and returns its `api_key` and `api_secret`.
 - `POST /v1/log` accepts raw `go-bugfixes/logs` and `bugfixes-rs` log payloads and stores them in the log stream.
 - `POST /v1/bug` accepts raw `go-bugfixes/middleware` and `bugfixes-rs` panic payloads, then maps them into canonical stacktrace events.
@@ -143,7 +146,53 @@ curl -X POST http://127.0.0.1:3000/v1/organizations/REPLACE_WITH_ORGANIZATION_ID
   }'
 ```
 
-Create an account inside an organization:
+Create a project:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/projects \
+  -H 'content-type: application/json' \
+  -H 'X-Clerk-User-Id: REPLACE_WITH_USER_ID' \
+  -H 'X-Clerk-Org-Id: REPLACE_WITH_CLERK_ORG_ID' \
+  -d '{
+    "name": "bugfixes"
+  }'
+```
+
+Create a subproject:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/projects/REPLACE_WITH_PROJECT_ID/subprojects \
+  -H 'content-type: application/json' \
+  -H 'X-Clerk-User-Id: REPLACE_WITH_USER_ID' \
+  -H 'X-Clerk-Org-Id: REPLACE_WITH_CLERK_ORG_ID' \
+  -d '{
+    "name": "daphne"
+  }'
+```
+
+Create an environment and its backing account:
+
+```bash
+curl -X POST http://127.0.0.1:3000/v1/subprojects/REPLACE_WITH_SUBPROJECT_ID/environments \
+  -H 'content-type: application/json' \
+  -H 'X-Clerk-User-Id: REPLACE_WITH_USER_ID' \
+  -H 'X-Clerk-Org-Id: REPLACE_WITH_CLERK_ORG_ID' \
+  -d '{
+    "name": "production",
+    "create_tickets": true,
+    "ticket_provider": "jira",
+    "ticketing_api_key": "jira_test_key",
+    "notification_provider": "slack",
+    "notification_api_key": "slack_webhook_or_key",
+    "ai_enabled": true,
+    "use_managed_ai": true,
+    "notify_min_level": "error",
+    "rapid_occurrence_window_minutes": 30,
+    "rapid_occurrence_threshold": 3
+  }'
+```
+
+Create an account directly inside an organization:
 
 ```bash
 curl -X POST http://127.0.0.1:3000/v1/accounts \
@@ -270,9 +319,12 @@ Current bug record semantics that are easy to miss:
 - `organizations` are the top-level ownership boundary for dashboard onboarding, member management, and future auth, audit, and billing work.
 - `users` represent human operators identified by email.
 - `memberships` connect users to organizations with `owner`, `admin`, or `member` roles.
-- `accounts` belong to organizations and own the operational policy: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
+- `projects` belong to organizations and model the top-level product or codebase boundary.
+- `subprojects` belong to projects and model a deployable slice such as `backend`, `frontend`, or `dashboard`.
+- `environments` belong to subprojects and map one-to-one to the backing operational `account`.
+- `accounts` belong to organizations and own the operational policy for one environment: create tickets or not, which ticketing system to use, when to notify, and what counts as a rapid repeat.
 - `account_provider_configs` stores the current per-account provider snapshot for ticketing, notifications, and AI mode.
-- `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`, and each agent remains attached to an account inside an organization.
+- `agents` authenticate intake requests with `X-API-KEY` and `X-API-SECRET`, and each agent remains attached to an environment-backed account inside an organization.
 - `bugs` are deduplicated by `account_id + stacktrace_hash`.
 - `occurrences` store each event, including `service`, `environment`, and free-form attributes, so rapid-repeat detection and future drill-down screens can use the original context.
 - `logs` stores non-bug log events separately from the deduplicated bug model.

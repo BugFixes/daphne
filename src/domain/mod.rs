@@ -241,6 +241,60 @@ impl FromStr for OrganizationRole {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OrganizationPlanTier {
+    Single,
+}
+
+impl OrganizationPlanTier {
+    pub fn max_projects_per_organization(self) -> usize {
+        match self {
+            Self::Single => 1,
+        }
+    }
+
+    pub fn max_subprojects_per_project(self) -> usize {
+        match self {
+            Self::Single => 1,
+        }
+    }
+
+    pub fn max_environments_per_subproject(self) -> usize {
+        match self {
+            Self::Single => 1,
+        }
+    }
+
+    pub fn max_agents_per_environment(self) -> usize {
+        match self {
+            Self::Single => 1,
+        }
+    }
+}
+
+impl fmt::Display for OrganizationPlanTier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let value = match self {
+            Self::Single => "single",
+        };
+        write!(f, "{value}")
+    }
+}
+
+impl FromStr for OrganizationPlanTier {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "single" => Ok(Self::Single),
+            _ => Err(AppError::Validation(format!(
+                "unsupported organization plan tier: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TicketPriority {
@@ -311,6 +365,7 @@ pub struct Organization {
     pub id: Uuid,
     pub name: String,
     pub clerk_org_id: Option<String>,
+    pub plan_tier: OrganizationPlanTier,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -375,6 +430,40 @@ pub struct AccountProviderConfig {
     pub settings: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subproject {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Environment {
+    pub id: Uuid,
+    pub subproject_id: Uuid,
+    pub account_id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentProvisioning {
+    pub environment: Environment,
+    pub account: Account,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -664,6 +753,22 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProjectRequest {
+    pub name: String,
+}
+
+impl CreateProjectRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "project name cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateOrganizationRequest {
     pub name: String,
     pub clerk_org_id: Option<String>,
@@ -693,6 +798,22 @@ impl CreateOrganizationRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSubprojectRequest {
+    pub name: String,
+}
+
+impl CreateSubprojectRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "subproject name cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AddOrganizationMemberRequest {
     pub clerk_user_id: String,
     pub name: String,
@@ -715,6 +836,72 @@ impl AddOrganizationMemberRequest {
             ));
         }
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub create_tickets: bool,
+    pub ticket_provider: TicketProvider,
+    #[serde(default)]
+    pub ticketing_api_key: Option<String>,
+    pub notification_provider: NotificationProvider,
+    #[serde(default)]
+    pub notification_api_key: Option<String>,
+    #[serde(default = "default_true")]
+    pub ai_enabled: bool,
+    #[serde(default = "default_true")]
+    pub use_managed_ai: bool,
+    #[serde(default)]
+    pub ai_api_key: Option<String>,
+    pub notify_min_level: Severity,
+    pub rapid_occurrence_window_minutes: i64,
+    pub rapid_occurrence_threshold: i64,
+}
+
+impl CreateEnvironmentRequest {
+    pub fn validate(&self) -> AppResult<()> {
+        if self.name.trim().is_empty() {
+            return Err(AppError::Validation(
+                "environment name cannot be empty".to_string(),
+            ));
+        }
+
+        CreateAccountRequest {
+            organization_id: None,
+            name: self.name.clone(),
+            create_tickets: self.create_tickets,
+            ticket_provider: self.ticket_provider,
+            ticketing_api_key: self.ticketing_api_key.clone(),
+            notification_provider: self.notification_provider,
+            notification_api_key: self.notification_api_key.clone(),
+            ai_enabled: self.ai_enabled,
+            use_managed_ai: self.use_managed_ai,
+            ai_api_key: self.ai_api_key.clone(),
+            notify_min_level: self.notify_min_level,
+            rapid_occurrence_window_minutes: self.rapid_occurrence_window_minutes,
+            rapid_occurrence_threshold: self.rapid_occurrence_threshold,
+        }
+        .validate()
+    }
+
+    pub fn into_account_request(self, organization_id: Uuid, name: String) -> CreateAccountRequest {
+        CreateAccountRequest {
+            organization_id: Some(organization_id),
+            name,
+            create_tickets: self.create_tickets,
+            ticket_provider: self.ticket_provider,
+            ticketing_api_key: self.ticketing_api_key,
+            notification_provider: self.notification_provider,
+            notification_api_key: self.notification_api_key,
+            ai_enabled: self.ai_enabled,
+            use_managed_ai: self.use_managed_ai,
+            ai_api_key: self.ai_api_key,
+            notify_min_level: self.notify_min_level,
+            rapid_occurrence_window_minutes: self.rapid_occurrence_window_minutes,
+            rapid_occurrence_threshold: self.rapid_occurrence_threshold,
+        }
     }
 }
 

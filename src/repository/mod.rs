@@ -11,10 +11,12 @@ use crate::{
     domain::{
         Account, AccountProviderConfig, AccountProviderKind, AddOrganizationMemberRequest, Agent,
         ApiKeyRecord, ApiKeyScope, ApiKeyType, ApiKeyWithSecret, Bug, CreateAccountRequest,
-        CreateAgentRequest, CreateApiKeyRequest, CreateOrganizationRequest, LogArchive, LogRecord,
-        Membership, MembershipRecord, NotificationEvent, NotificationEventStatus,
-        NotificationProvider, NotificationRecord, Occurrence, Organization, OrganizationAccess,
-        OrganizationRole, Severity, Ticket, TicketAction, TicketEvent, TicketPriority,
+        CreateAgentRequest, CreateApiKeyRequest, CreateEnvironmentRequest,
+        CreateOrganizationRequest, CreateProjectRequest, CreateSubprojectRequest, Environment,
+        EnvironmentProvisioning, LogArchive, LogRecord, Membership, MembershipRecord,
+        NotificationEvent, NotificationEventStatus, NotificationProvider, NotificationRecord,
+        Occurrence, Organization, OrganizationAccess, OrganizationPlanTier, OrganizationRole,
+        Project, Severity, Subproject, Ticket, TicketAction, TicketEvent, TicketPriority,
         TicketProvider, UpdateOrganizationMembershipRequest, User,
     },
     migrations,
@@ -96,6 +98,7 @@ impl Repository {
             id: Uuid::new_v4(),
             name: request.name.trim().to_string(),
             clerk_org_id: request.clerk_org_id,
+            plan_tier: OrganizationPlanTier::Single,
             created_at: now,
             updated_at: now,
         };
@@ -132,7 +135,7 @@ impl Repository {
         clerk_user_id: &str,
     ) -> AppResult<Vec<OrganizationAccess>> {
         sqlx::query_as::<_, OrganizationAccessRow>(
-            "SELECT o.id AS organization_id, o.name AS organization_name, o.clerk_org_id AS organization_clerk_org_id, o.created_at AS organization_created_at, o.updated_at AS organization_updated_at, m.id AS membership_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at FROM memberships m JOIN organizations o ON o.id = m.organization_id JOIN users u ON u.id = m.user_id WHERE u.clerk_user_id = $1 ORDER BY o.created_at ASC",
+            "SELECT o.id AS organization_id, o.name AS organization_name, o.clerk_org_id AS organization_clerk_org_id, o.plan_tier AS organization_plan_tier, o.created_at AS organization_created_at, o.updated_at AS organization_updated_at, m.id AS membership_id, m.user_id AS membership_user_id, m.role AS membership_role, m.created_at AS membership_created_at, m.updated_at AS membership_updated_at FROM memberships m JOIN organizations o ON o.id = m.organization_id JOIN users u ON u.id = m.user_id WHERE u.clerk_user_id = $1 ORDER BY o.created_at ASC",
         )
         .bind(clerk_user_id)
         .fetch_all(&self.pool)
@@ -147,12 +150,24 @@ impl Repository {
         clerk_org_id: &str,
     ) -> AppResult<Organization> {
         let row = sqlx::query_as::<_, OrganizationRow>(
-            "SELECT id, name, clerk_org_id, created_at, updated_at FROM organizations WHERE clerk_org_id = $1",
+            "SELECT id, name, clerk_org_id, plan_tier, created_at, updated_at FROM organizations WHERE clerk_org_id = $1",
         )
         .bind(clerk_org_id)
         .fetch_optional(&self.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("organization with clerk_org_id {clerk_org_id}")))?;
+
+        row.try_into()
+    }
+
+    pub async fn find_organization_by_id(&self, organization_id: Uuid) -> AppResult<Organization> {
+        let row = sqlx::query_as::<_, OrganizationRow>(
+            "SELECT id, name, clerk_org_id, plan_tier, created_at, updated_at FROM organizations WHERE id = $1",
+        )
+        .bind(organization_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("organization {organization_id}")))?;
 
         row.try_into()
     }
@@ -366,89 +381,140 @@ impl Repository {
 
     pub async fn create_account(&self, request: CreateAccountRequest) -> AppResult<Account> {
         request.validate()?;
-        let CreateAccountRequest {
-            organization_id,
-            name,
-            create_tickets,
-            ticket_provider,
-            ticketing_api_key,
-            notification_provider,
-            notification_api_key,
-            ai_enabled,
-            use_managed_ai,
-            ai_api_key,
-            notify_min_level,
-            rapid_occurrence_window_minutes,
-            rapid_occurrence_threshold,
-        } = request;
         let now = Utc::now();
         let mut tx = self.pool.begin().await?;
-        let organization_id = match organization_id {
+        let organization = match request.organization_id {
             Some(organization_id) => {
-                find_organization_tx(&mut tx, organization_id).await?;
-                organization_id
+                let organization = find_organization_tx(&mut tx, organization_id).await?;
+                enforce_account_limit_tx(&mut tx, &organization).await?;
+                organization
             }
             None => {
                 let organization = Organization {
                     id: Uuid::new_v4(),
-                    name: name.trim().to_string(),
+                    name: request.name.trim().to_string(),
                     clerk_org_id: None,
+                    plan_tier: OrganizationPlanTier::Single,
                     created_at: now,
                     updated_at: now,
                 };
                 insert_organization_tx(&mut tx, &organization).await?;
-                organization.id
+                organization
             }
         };
-        let account = Account {
-            id: Uuid::new_v4(),
-            organization_id,
-            name,
-            create_tickets,
-            ticket_provider,
-            ticketing_api_key: normalize_optional(ticketing_api_key),
-            notification_provider,
-            notification_api_key: normalize_optional(notification_api_key),
-            ai_enabled,
-            use_managed_ai,
-            ai_api_key: normalize_optional(ai_api_key),
-            notify_min_level,
-            rapid_occurrence_window_minutes,
-            rapid_occurrence_threshold,
-        };
-        let provider_configs = build_provider_configs(&account, now);
-
-        sqlx::query(
-            "INSERT INTO accounts (id, organization_id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
-        )
-        .bind(account.id.to_string())
-        .bind(account.organization_id.to_string())
-        .bind(account.name.clone())
-        .bind(account.create_tickets as i32)
-        .bind(account.ticket_provider.to_string())
-        .bind(account.ticketing_api_key.clone())
-        .bind(account.notification_provider.to_string())
-        .bind(account.notification_api_key.clone())
-        .bind(account.ai_enabled as i32)
-        .bind(account.use_managed_ai as i32)
-        .bind(account.ai_api_key.clone())
-        .bind(account.notify_min_level.to_string())
-        .bind(account.rapid_occurrence_window_minutes as i32)
-        .bind(account.rapid_occurrence_threshold as i32)
-        .execute(&mut *tx)
-        .await?;
-
-        for config in &provider_configs {
-            insert_account_provider_config_tx(&mut tx, config).await?;
-        }
+        let account = insert_account_tx(&mut tx, organization.id, request, now).await?;
 
         tx.commit().await?;
         Ok(account)
     }
 
+    pub async fn create_project(
+        &self,
+        organization_id: Uuid,
+        request: CreateProjectRequest,
+    ) -> AppResult<Project> {
+        request.validate()?;
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
+        let organization = find_organization_tx(&mut tx, organization_id).await?;
+        enforce_project_limit_tx(&mut tx, &organization).await?;
+
+        let project = Project {
+            id: Uuid::new_v4(),
+            organization_id,
+            name: request.name.trim().to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        insert_project_tx(&mut tx, &project).await?;
+        tx.commit().await?;
+        Ok(project)
+    }
+
+    pub async fn create_subproject(
+        &self,
+        organization_id: Uuid,
+        project_id: Uuid,
+        request: CreateSubprojectRequest,
+    ) -> AppResult<Subproject> {
+        request.validate()?;
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
+        let project = find_project_tx(&mut tx, organization_id, project_id).await?;
+        let organization = find_organization_tx(&mut tx, organization_id).await?;
+        enforce_subproject_limit_tx(&mut tx, &organization, project.id).await?;
+
+        let subproject = Subproject {
+            id: Uuid::new_v4(),
+            project_id: project.id,
+            name: request.name.trim().to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        insert_subproject_tx(&mut tx, &subproject).await?;
+        tx.commit().await?;
+        Ok(subproject)
+    }
+
+    pub async fn create_environment(
+        &self,
+        organization_id: Uuid,
+        subproject_id: Uuid,
+        request: CreateEnvironmentRequest,
+    ) -> AppResult<EnvironmentProvisioning> {
+        request.validate()?;
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await?;
+        let organization = find_organization_tx(&mut tx, organization_id).await?;
+        let context = find_subproject_context_tx(&mut tx, organization_id, subproject_id).await?;
+
+        enforce_environment_limit_tx(&mut tx, &organization, context.subproject.id).await?;
+        enforce_account_limit_tx(&mut tx, &organization).await?;
+
+        let environment_name = request.name.trim().to_string();
+        let account_name = format!(
+            "{} / {} / {}",
+            context.project.name, context.subproject.name, environment_name
+        );
+        let account = insert_account_tx(
+            &mut tx,
+            organization.id,
+            request.into_account_request(organization.id, account_name),
+            now,
+        )
+        .await?;
+        let environment = Environment {
+            id: Uuid::new_v4(),
+            subproject_id: context.subproject.id,
+            account_id: account.id,
+            name: environment_name,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_environment_tx(&mut tx, &environment).await?;
+
+        tx.commit().await?;
+
+        Ok(EnvironmentProvisioning {
+            environment,
+            account,
+        })
+    }
+
     pub async fn create_agent(&self, request: CreateAgentRequest) -> AppResult<Agent> {
         request.validate()?;
-        self.find_account(request.account_id).await?;
+        let account = self.find_account(request.account_id).await?;
+        let organization = self
+            .find_organization_by_id(account.organization_id)
+            .await?;
+        let agent_count = count_agents_for_account(&self.pool, account.id).await?;
+        if agent_count >= organization.plan_tier.max_agents_per_environment() {
+            return Err(AppError::Validation(format!(
+                "plan {:?} allows at most {} agent per environment",
+                organization.plan_tier,
+                organization.plan_tier.max_agents_per_environment()
+            )));
+        }
 
         let agent = Agent {
             id: Uuid::new_v4(),
@@ -1276,6 +1342,20 @@ impl Repository {
         .transpose()
     }
 
+    pub async fn find_environment_by_account_id(
+        &self,
+        account_id: Uuid,
+    ) -> AppResult<Option<Environment>> {
+        sqlx::query_as::<_, EnvironmentRow>(
+            "SELECT id, subproject_id, account_id, name, created_at, updated_at FROM environments WHERE account_id = $1",
+        )
+        .bind(account_id.to_string())
+        .fetch_optional(&self.pool)
+        .await?
+        .map(TryInto::try_into)
+        .transpose()
+    }
+
     pub async fn find_agent_by_id(&self, agent_id: Uuid) -> AppResult<Option<Agent>> {
         sqlx::query_as::<_, AgentRow>(
             "SELECT id, account_id, name, api_key, api_secret FROM agents WHERE id = $1",
@@ -1377,16 +1457,68 @@ async fn insert_account_provider_config_tx(
     Ok(())
 }
 
+async fn insert_account_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    request: CreateAccountRequest,
+    now: DateTime<Utc>,
+) -> AppResult<Account> {
+    let account = Account {
+        id: Uuid::new_v4(),
+        organization_id,
+        name: request.name,
+        create_tickets: request.create_tickets,
+        ticket_provider: request.ticket_provider,
+        ticketing_api_key: normalize_optional(request.ticketing_api_key),
+        notification_provider: request.notification_provider,
+        notification_api_key: normalize_optional(request.notification_api_key),
+        ai_enabled: request.ai_enabled,
+        use_managed_ai: request.use_managed_ai,
+        ai_api_key: normalize_optional(request.ai_api_key),
+        notify_min_level: request.notify_min_level,
+        rapid_occurrence_window_minutes: request.rapid_occurrence_window_minutes,
+        rapid_occurrence_threshold: request.rapid_occurrence_threshold,
+    };
+    let provider_configs = build_provider_configs(&account, now);
+
+    sqlx::query(
+        "INSERT INTO accounts (id, organization_id, name, create_tickets, ticket_provider, ticketing_api_key, notification_provider, notification_api_key, ai_enabled, use_managed_ai, ai_api_key, notify_min_level, rapid_occurrence_window_minutes, rapid_occurrence_threshold) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+    )
+    .bind(account.id.to_string())
+    .bind(account.organization_id.to_string())
+    .bind(account.name.clone())
+    .bind(account.create_tickets as i32)
+    .bind(account.ticket_provider.to_string())
+    .bind(account.ticketing_api_key.clone())
+    .bind(account.notification_provider.to_string())
+    .bind(account.notification_api_key.clone())
+    .bind(account.ai_enabled as i32)
+    .bind(account.use_managed_ai as i32)
+    .bind(account.ai_api_key.clone())
+    .bind(account.notify_min_level.to_string())
+    .bind(account.rapid_occurrence_window_minutes as i32)
+    .bind(account.rapid_occurrence_threshold as i32)
+    .execute(&mut **tx)
+    .await?;
+
+    for config in &provider_configs {
+        insert_account_provider_config_tx(tx, config).await?;
+    }
+
+    Ok(account)
+}
+
 async fn insert_organization_tx(
     tx: &mut Transaction<'_, Postgres>,
     organization: &Organization,
 ) -> AppResult<()> {
     sqlx::query(
-        "INSERT INTO organizations (id, name, clerk_org_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO organizations (id, name, clerk_org_id, plan_tier, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(organization.id.to_string())
     .bind(organization.name.clone())
     .bind(organization.clerk_org_id.clone())
+    .bind(organization.plan_tier.to_string())
     .bind(organization.created_at.to_rfc3339())
     .bind(organization.updated_at.to_rfc3339())
     .execute(&mut **tx)
@@ -1419,7 +1551,7 @@ async fn find_organization_tx(
     organization_id: Uuid,
 ) -> AppResult<Organization> {
     let row = sqlx::query_as::<_, OrganizationRow>(
-        "SELECT id, name, clerk_org_id, created_at, updated_at FROM organizations WHERE id = $1",
+        "SELECT id, name, clerk_org_id, plan_tier, created_at, updated_at FROM organizations WHERE id = $1",
     )
     .bind(organization_id.to_string())
     .fetch_optional(&mut **tx)
@@ -1427,6 +1559,212 @@ async fn find_organization_tx(
     .ok_or_else(|| AppError::NotFound(format!("organization {organization_id}")))?;
 
     row.try_into()
+}
+
+async fn insert_project_tx(tx: &mut Transaction<'_, Postgres>, project: &Project) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO projects (id, organization_id, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(project.id.to_string())
+    .bind(project.organization_id.to_string())
+    .bind(project.name.clone())
+    .bind(project.created_at.to_rfc3339())
+    .bind(project.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_subproject_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    subproject: &Subproject,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO subprojects (id, project_id, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(subproject.id.to_string())
+    .bind(subproject.project_id.to_string())
+    .bind(subproject.name.clone())
+    .bind(subproject.created_at.to_rfc3339())
+    .bind(subproject.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn insert_environment_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    environment: &Environment,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO environments (id, subproject_id, account_id, name, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(environment.id.to_string())
+    .bind(environment.subproject_id.to_string())
+    .bind(environment.account_id.to_string())
+    .bind(environment.name.clone())
+    .bind(environment.created_at.to_rfc3339())
+    .bind(environment.updated_at.to_rfc3339())
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn find_project_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    project_id: Uuid,
+) -> AppResult<Project> {
+    let row = sqlx::query_as::<_, ProjectRow>(
+        "SELECT id, organization_id, name, created_at, updated_at FROM projects WHERE id = $1 AND organization_id = $2",
+    )
+    .bind(project_id.to_string())
+    .bind(organization_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("project {project_id}")))?;
+
+    row.try_into()
+}
+
+struct SubprojectContext {
+    project: Project,
+    subproject: Subproject,
+}
+
+async fn find_subproject_context_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+    subproject_id: Uuid,
+) -> AppResult<SubprojectContext> {
+    let row = sqlx::query_as::<_, SubprojectContextRow>(
+        "SELECT p.id AS project_id, p.organization_id AS project_organization_id, p.name AS project_name, p.created_at AS project_created_at, p.updated_at AS project_updated_at, s.id AS subproject_id, s.project_id AS subproject_project_id, s.name AS subproject_name, s.created_at AS subproject_created_at, s.updated_at AS subproject_updated_at FROM subprojects s JOIN projects p ON p.id = s.project_id WHERE s.id = $1 AND p.organization_id = $2",
+    )
+    .bind(subproject_id.to_string())
+    .bind(organization_id.to_string())
+    .fetch_optional(&mut **tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("subproject {subproject_id}")))?;
+
+    row.try_into()
+}
+
+async fn enforce_account_limit_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization: &Organization,
+) -> AppResult<()> {
+    let count = count_accounts_for_organization_tx(tx, organization.id).await?;
+    let max = organization.plan_tier.max_projects_per_organization();
+    if count >= max {
+        return Err(AppError::Validation(format!(
+            "current plan allows at most {max} environment for this organization"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn enforce_project_limit_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization: &Organization,
+) -> AppResult<()> {
+    let count = count_projects_for_organization_tx(tx, organization.id).await?;
+    let max = organization.plan_tier.max_projects_per_organization();
+    if count >= max {
+        return Err(AppError::Validation(format!(
+            "current plan allows at most {max} project for this organization"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn enforce_subproject_limit_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization: &Organization,
+    project_id: Uuid,
+) -> AppResult<()> {
+    let count = count_subprojects_for_project_tx(tx, project_id).await?;
+    let max = organization.plan_tier.max_subprojects_per_project();
+    if count >= max {
+        return Err(AppError::Validation(format!(
+            "current plan allows at most {max} subproject for this project"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn enforce_environment_limit_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization: &Organization,
+    subproject_id: Uuid,
+) -> AppResult<()> {
+    let count = count_environments_for_subproject_tx(tx, subproject_id).await?;
+    let max = organization.plan_tier.max_environments_per_subproject();
+    if count >= max {
+        return Err(AppError::Validation(format!(
+            "current plan allows at most {max} environment for this subproject"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn count_accounts_for_organization_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+) -> AppResult<usize> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM accounts WHERE organization_id = $1")
+        .bind(organization_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(count as usize)
+}
+
+async fn count_projects_for_organization_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    organization_id: Uuid,
+) -> AppResult<usize> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE organization_id = $1")
+        .bind(organization_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(count as usize)
+}
+
+async fn count_subprojects_for_project_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+) -> AppResult<usize> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM subprojects WHERE project_id = $1")
+        .bind(project_id.to_string())
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(count as usize)
+}
+
+async fn count_environments_for_subproject_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    subproject_id: Uuid,
+) -> AppResult<usize> {
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM environments WHERE subproject_id = $1")
+            .bind(subproject_id.to_string())
+            .fetch_one(&mut **tx)
+            .await?;
+    Ok(count as usize)
+}
+
+async fn count_agents_for_account(pool: &PgPool, account_id: Uuid) -> AppResult<usize> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE account_id = $1")
+        .bind(account_id.to_string())
+        .fetch_one(pool)
+        .await?;
+    Ok(count as usize)
 }
 
 async fn find_or_create_user_tx(
@@ -1597,6 +1935,7 @@ struct OrganizationRow {
     id: String,
     name: String,
     clerk_org_id: Option<String>,
+    plan_tier: String,
     created_at: String,
     updated_at: String,
 }
@@ -1609,6 +1948,7 @@ impl TryFrom<OrganizationRow> for Organization {
             id: Uuid::parse_str(&row.id)?,
             name: row.name,
             clerk_org_id: row.clerk_org_id,
+            plan_tier: OrganizationPlanTier::from_str(&row.plan_tier)?,
             created_at: parse_rfc3339_utc(&row.created_at)?,
             updated_at: parse_rfc3339_utc(&row.updated_at)?,
         })
@@ -1670,6 +2010,7 @@ struct OrganizationAccessRow {
     organization_id: String,
     organization_name: String,
     organization_clerk_org_id: Option<String>,
+    organization_plan_tier: String,
     organization_created_at: String,
     organization_updated_at: String,
     membership_id: String,
@@ -1688,6 +2029,7 @@ impl TryFrom<OrganizationAccessRow> for OrganizationAccess {
                 id: Uuid::parse_str(&row.organization_id)?,
                 name: row.organization_name,
                 clerk_org_id: row.organization_clerk_org_id,
+                plan_tier: OrganizationPlanTier::from_str(&row.organization_plan_tier)?,
                 created_at: parse_rfc3339_utc(&row.organization_created_at)?,
                 updated_at: parse_rfc3339_utc(&row.organization_updated_at)?,
             },
@@ -1768,6 +2110,114 @@ impl TryFrom<AccountProviderConfigRow> for AccountProviderConfig {
             settings: serde_json::from_str(&row.settings_json)?,
             created_at: parse_rfc3339_utc(&row.created_at)?,
             updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct ProjectRow {
+    id: String,
+    organization_id: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<ProjectRow> for Project {
+    type Error = AppError;
+
+    fn try_from(row: ProjectRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            organization_id: Uuid::parse_str(&row.organization_id)?,
+            name: row.name,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct SubprojectRow {
+    id: String,
+    project_id: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<SubprojectRow> for Subproject {
+    type Error = AppError;
+
+    fn try_from(row: SubprojectRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            project_id: Uuid::parse_str(&row.project_id)?,
+            name: row.name,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct EnvironmentRow {
+    id: String,
+    subproject_id: String,
+    account_id: String,
+    name: String,
+    created_at: String,
+    updated_at: String,
+}
+
+impl TryFrom<EnvironmentRow> for Environment {
+    type Error = AppError;
+
+    fn try_from(row: EnvironmentRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: Uuid::parse_str(&row.id)?,
+            subproject_id: Uuid::parse_str(&row.subproject_id)?,
+            account_id: Uuid::parse_str(&row.account_id)?,
+            name: row.name,
+            created_at: parse_rfc3339_utc(&row.created_at)?,
+            updated_at: parse_rfc3339_utc(&row.updated_at)?,
+        })
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct SubprojectContextRow {
+    project_id: String,
+    project_organization_id: String,
+    project_name: String,
+    project_created_at: String,
+    project_updated_at: String,
+    subproject_id: String,
+    subproject_project_id: String,
+    subproject_name: String,
+    subproject_created_at: String,
+    subproject_updated_at: String,
+}
+
+impl TryFrom<SubprojectContextRow> for SubprojectContext {
+    type Error = AppError;
+
+    fn try_from(row: SubprojectContextRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            project: Project {
+                id: Uuid::parse_str(&row.project_id)?,
+                organization_id: Uuid::parse_str(&row.project_organization_id)?,
+                name: row.project_name,
+                created_at: parse_rfc3339_utc(&row.project_created_at)?,
+                updated_at: parse_rfc3339_utc(&row.project_updated_at)?,
+            },
+            subproject: Subproject {
+                id: Uuid::parse_str(&row.subproject_id)?,
+                project_id: Uuid::parse_str(&row.subproject_project_id)?,
+                name: row.subproject_name,
+                created_at: parse_rfc3339_utc(&row.subproject_created_at)?,
+                updated_at: parse_rfc3339_utc(&row.subproject_updated_at)?,
+            },
         })
     }
 }

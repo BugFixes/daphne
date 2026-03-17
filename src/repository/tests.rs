@@ -6,7 +6,8 @@ use serial_test::serial;
 use crate::{
     domain::{
         AccountProviderKind, AddOrganizationMemberRequest, ApiKeyScope, ApiKeyType,
-        CreateAccountRequest, CreateAgentRequest, CreateApiKeyRequest, CreateOrganizationRequest,
+        CreateAccountRequest, CreateAgentRequest, CreateApiKeyRequest, CreateEnvironmentRequest,
+        CreateOrganizationRequest, CreateProjectRequest, CreateSubprojectRequest,
         NotificationProvider, OrganizationRole, Severity, TicketAction, TicketProvider,
         UpdateOrganizationMembershipRequest,
     },
@@ -539,4 +540,226 @@ async fn finds_api_key_by_credentials() {
         .find_api_key_by_credentials(&key.api_key.api_key, "wrong_secret")
         .await;
     assert!(not_found.is_err());
+}
+
+#[tokio::test]
+#[serial]
+async fn creates_project_hierarchy_and_environment_account() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let org = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "Bugfixes".to_string(),
+            clerk_org_id: Some("org_hierarchy".to_string()),
+            owner_clerk_user_id: "user_hierarchy_owner".to_string(),
+            owner_name: "Owner".to_string(),
+        })
+        .await
+        .expect("org");
+
+    let project = repository
+        .create_project(
+            org.organization.id,
+            CreateProjectRequest {
+                name: "bugfixes".to_string(),
+            },
+        )
+        .await
+        .expect("project");
+    let subproject = repository
+        .create_subproject(
+            org.organization.id,
+            project.id,
+            CreateSubprojectRequest {
+                name: "daphne".to_string(),
+            },
+        )
+        .await
+        .expect("subproject");
+    let provisioning = repository
+        .create_environment(
+            org.organization.id,
+            subproject.id,
+            CreateEnvironmentRequest {
+                name: "production".to_string(),
+                create_tickets: false,
+                ticket_provider: TicketProvider::None,
+                ticketing_api_key: None,
+                notification_provider: NotificationProvider::None,
+                notification_api_key: None,
+                ai_enabled: false,
+                use_managed_ai: false,
+                ai_api_key: None,
+                notify_min_level: Severity::Error,
+                rapid_occurrence_window_minutes: 30,
+                rapid_occurrence_threshold: 3,
+            },
+        )
+        .await
+        .expect("environment");
+
+    assert_eq!(provisioning.environment.subproject_id, subproject.id);
+    assert_eq!(provisioning.environment.name, "production");
+    assert_eq!(provisioning.account.organization_id, org.organization.id);
+    assert_eq!(provisioning.account.name, "bugfixes / daphne / production");
+
+    let environment = repository
+        .find_environment_by_account_id(provisioning.account.id)
+        .await
+        .expect("environment lookup")
+        .expect("environment");
+    assert_eq!(environment.id, provisioning.environment.id);
+}
+
+#[tokio::test]
+#[serial]
+async fn single_plan_limits_projects_accounts_and_agents() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let org = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "Single Tier".to_string(),
+            clerk_org_id: Some("org_single_tier".to_string()),
+            owner_clerk_user_id: "user_single_owner".to_string(),
+            owner_name: "Owner".to_string(),
+        })
+        .await
+        .expect("org");
+
+    let project = repository
+        .create_project(
+            org.organization.id,
+            CreateProjectRequest {
+                name: "bugfixes".to_string(),
+            },
+        )
+        .await
+        .expect("project");
+    let duplicate_project = repository
+        .create_project(
+            org.organization.id,
+            CreateProjectRequest {
+                name: "dashboard".to_string(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        duplicate_project,
+        Err(crate::AppError::Validation(_))
+    ));
+
+    let subproject = repository
+        .create_subproject(
+            org.organization.id,
+            project.id,
+            CreateSubprojectRequest {
+                name: "daphne".to_string(),
+            },
+        )
+        .await
+        .expect("subproject");
+    let duplicate_subproject = repository
+        .create_subproject(
+            org.organization.id,
+            project.id,
+            CreateSubprojectRequest {
+                name: "dashboard".to_string(),
+            },
+        )
+        .await;
+    assert!(matches!(
+        duplicate_subproject,
+        Err(crate::AppError::Validation(_))
+    ));
+
+    let provisioning = repository
+        .create_environment(
+            org.organization.id,
+            subproject.id,
+            CreateEnvironmentRequest {
+                name: "production".to_string(),
+                create_tickets: false,
+                ticket_provider: TicketProvider::None,
+                ticketing_api_key: None,
+                notification_provider: NotificationProvider::None,
+                notification_api_key: None,
+                ai_enabled: false,
+                use_managed_ai: false,
+                ai_api_key: None,
+                notify_min_level: Severity::Error,
+                rapid_occurrence_window_minutes: 30,
+                rapid_occurrence_threshold: 3,
+            },
+        )
+        .await
+        .expect("environment");
+
+    let duplicate_environment = repository
+        .create_environment(
+            org.organization.id,
+            subproject.id,
+            CreateEnvironmentRequest {
+                name: "staging".to_string(),
+                create_tickets: false,
+                ticket_provider: TicketProvider::None,
+                ticketing_api_key: None,
+                notification_provider: NotificationProvider::None,
+                notification_api_key: None,
+                ai_enabled: false,
+                use_managed_ai: false,
+                ai_api_key: None,
+                notify_min_level: Severity::Error,
+                rapid_occurrence_window_minutes: 30,
+                rapid_occurrence_threshold: 3,
+            },
+        )
+        .await;
+    assert!(matches!(
+        duplicate_environment,
+        Err(crate::AppError::Validation(_))
+    ));
+
+    let duplicate_account = repository
+        .create_account(CreateAccountRequest {
+            organization_id: Some(org.organization.id),
+            name: "Second Account".to_string(),
+            create_tickets: false,
+            ticket_provider: TicketProvider::None,
+            ticketing_api_key: None,
+            notification_provider: NotificationProvider::None,
+            notification_api_key: None,
+            ai_enabled: false,
+            use_managed_ai: false,
+            ai_api_key: None,
+            notify_min_level: Severity::Error,
+            rapid_occurrence_window_minutes: 30,
+            rapid_occurrence_threshold: 3,
+        })
+        .await;
+    assert!(matches!(
+        duplicate_account,
+        Err(crate::AppError::Validation(_))
+    ));
+
+    repository
+        .create_agent(CreateAgentRequest {
+            account_id: provisioning.account.id,
+            name: "primary-agent".to_string(),
+        })
+        .await
+        .expect("agent");
+    let duplicate_agent = repository
+        .create_agent(CreateAgentRequest {
+            account_id: provisioning.account.id,
+            name: "secondary-agent".to_string(),
+        })
+        .await;
+    assert!(matches!(
+        duplicate_agent,
+        Err(crate::AppError::Validation(_))
+    ));
 }
