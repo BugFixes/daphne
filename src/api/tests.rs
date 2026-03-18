@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::domain::{
     AuthenticatedStacktraceEventPayload, GoBugPayload, GoLogPayload, LogEventPayload, Membership,
-    Organization, OrganizationAccess, OrganizationRole, Permission, Severity,
+    Organization, OrganizationAccess, OrganizationPlanTier, OrganizationRole, Permission, Severity,
     StacktraceEventPayload,
 };
 
@@ -272,6 +272,164 @@ mod rbac_integration {
             .header("X-Clerk-User-Id", "user_outsider")
             .header("X-Clerk-Org-Id", "org_rbac_bugs_other")
             .body(Body::empty())
+            .expect("request");
+
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+mod project_hierarchy_integration {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serial_test::serial;
+    use tower::ServiceExt;
+
+    use crate::domain::{
+        CreateAccountRequest, CreateOrganizationRequest, NotificationProvider, Severity,
+        TicketProvider,
+    };
+    use crate::test_support::{build_test_app, reset_database};
+
+    async fn seed_org(
+        repository: &crate::repository::Repository,
+        clerk_org_id: &str,
+        owner_clerk_user_id: &str,
+    ) -> uuid::Uuid {
+        repository
+            .create_organization(CreateOrganizationRequest {
+                name: "Bugfixes".to_string(),
+                clerk_org_id: Some(clerk_org_id.to_string()),
+                owner_clerk_user_id: owner_clerk_user_id.to_string(),
+                owner_name: "Owner".to_string(),
+            })
+            .await
+            .expect("org")
+            .organization
+            .id
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn admin_can_create_project_subproject_and_environment() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        seed_org(&repository, "org_projects", "user_projects_owner").await;
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/projects")
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_projects_owner")
+            .header("X-Clerk-Org-Id", "org_projects")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "name": "bugfixes" })).expect("json"),
+            ))
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let project: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/projects/{}/subprojects",
+                project["id"].as_str().expect("project id")
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_projects_owner")
+            .header("X-Clerk-Org-Id", "org_projects")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({ "name": "daphne" })).expect("json"),
+            ))
+            .expect("request");
+        let response = app.clone().oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let subproject: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/v1/subprojects/{}/environments",
+                subproject["id"].as_str().expect("subproject id")
+            ))
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_projects_owner")
+            .header("X-Clerk-Org-Id", "org_projects")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "name": "production",
+                    "create_tickets": false,
+                    "ticket_provider": "none",
+                    "notification_provider": "none",
+                    "ai_enabled": false,
+                    "use_managed_ai": false,
+                    "notify_min_level": "error",
+                    "rapid_occurrence_window_minutes": 30,
+                    "rapid_occurrence_threshold": 3
+                }))
+                .expect("json"),
+            ))
+            .expect("request");
+        let response = app.oneshot(request).await.expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let provisioning: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+        assert_eq!(provisioning["environment"]["name"], "production");
+        assert_eq!(
+            provisioning["account"]["name"],
+            "bugfixes / daphne / production"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn org_cannot_create_agent_for_another_org_account() {
+        let (app, repository) = build_test_app().await;
+        reset_database().await;
+        seed_org(&repository, "org_agents_one", "user_agents_one").await;
+        let other_org_id = seed_org(&repository, "org_agents_two", "user_agents_two").await;
+        let other_account = repository
+            .create_account(CreateAccountRequest {
+                organization_id: Some(other_org_id),
+                name: "Other Account".to_string(),
+                create_tickets: false,
+                ticket_provider: TicketProvider::None,
+                ticketing_api_key: None,
+                notification_provider: NotificationProvider::None,
+                notification_api_key: None,
+                ai_enabled: false,
+                use_managed_ai: false,
+                ai_api_key: None,
+                notify_min_level: Severity::Error,
+                rapid_occurrence_window_minutes: 30,
+                rapid_occurrence_threshold: 3,
+            })
+            .await
+            .expect("account");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/agents")
+            .header("Content-Type", "application/json")
+            .header("X-Clerk-User-Id", "user_agents_one")
+            .header("X-Clerk-Org-Id", "org_agents_one")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "account_id": other_account.id,
+                    "name": "cross-org-agent"
+                }))
+                .expect("json"),
+            ))
             .expect("request");
 
         let response = app.oneshot(request).await.expect("response");
@@ -812,6 +970,7 @@ fn allows_dashboard_access_for_matching_org_membership() {
             id: Uuid::new_v4(),
             name: "Acme".to_string(),
             clerk_org_id: Some("org_acme".to_string()),
+            plan_tier: OrganizationPlanTier::Single,
             created_at: now,
             updated_at: now,
         },
@@ -836,6 +995,7 @@ fn rejects_dashboard_access_for_non_member_org() {
             id: Uuid::new_v4(),
             name: "Acme".to_string(),
             clerk_org_id: Some("org_acme".to_string()),
+            plan_tier: OrganizationPlanTier::Single,
             created_at: now,
             updated_at: now,
         },
@@ -865,6 +1025,7 @@ fn make_org_access(role: OrganizationRole) -> OrganizationAccess {
             id: Uuid::new_v4(),
             name: "Acme".to_string(),
             clerk_org_id: Some("org_acme".to_string()),
+            plan_tier: OrganizationPlanTier::Single,
             created_at: now,
             updated_at: now,
         },

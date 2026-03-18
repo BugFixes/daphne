@@ -15,9 +15,10 @@ use crate::{
     AppError, AppResult,
     domain::{
         AddOrganizationMemberRequest, ApiKeyType, AuthenticatedStacktraceEventPayload,
-        CreateAccountRequest, CreateAgentRequest, CreateApiKeyRequest, CreateOrganizationRequest,
-        GoBugPayload, GoLogPayload, LogEvent, LogEventPayload, OrganizationAccess, Permission,
-        Severity, StacktraceEvent, StacktraceEventPayload, UpdateOrganizationMembershipRequest,
+        CreateAccountRequest, CreateAgentRequest, CreateApiKeyRequest, CreateEnvironmentRequest,
+        CreateOrganizationRequest, CreateProjectRequest, CreateSubprojectRequest, GoBugPayload,
+        GoLogPayload, LogEvent, LogEventPayload, OrganizationAccess, Permission, Severity,
+        StacktraceEvent, StacktraceEventPayload, UpdateOrganizationMembershipRequest,
     },
     repository::Repository,
     service::IntakeService,
@@ -54,6 +55,15 @@ pub fn router(repository: Arc<Repository>, intake_service: Arc<IntakeService>) -
             patch(update_member_role),
         )
         .route("/v1/accounts", post(create_account))
+        .route("/v1/projects", post(create_project))
+        .route(
+            "/v1/projects/{project_id}/subprojects",
+            post(create_subproject),
+        )
+        .route(
+            "/v1/subprojects/{subproject_id}/environments",
+            post(create_environment),
+        )
         .route("/v1/agents", post(create_agent))
         .route(
             "/v1/api-keys",
@@ -200,12 +210,76 @@ async fn create_account(
     Ok(Json(account))
 }
 
+async fn create_project(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateProjectRequest>,
+) -> AppResult<Json<crate::domain::Project>> {
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+    let project = state.repository.create_project(org.id, request).await?;
+    Ok(Json(project))
+}
+
+async fn create_subproject(
+    State(state): State<AppState>,
+    Path(project_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<CreateSubprojectRequest>,
+) -> AppResult<Json<crate::domain::Subproject>> {
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+    let subproject = state
+        .repository
+        .create_subproject(org.id, project_id, request)
+        .await?;
+    Ok(Json(subproject))
+}
+
+async fn create_environment(
+    State(state): State<AppState>,
+    Path(subproject_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<CreateEnvironmentRequest>,
+) -> AppResult<Json<crate::domain::EnvironmentProvisioning>> {
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+    let provisioning = state
+        .repository
+        .create_environment(org.id, subproject_id, request)
+        .await?;
+    Ok(Json(provisioning))
+}
+
 async fn create_agent(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(request): Json<CreateAgentRequest>,
 ) -> AppResult<Json<crate::domain::Agent>> {
-    require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
+    let clerk_org_id =
+        require_dashboard_clerk_org_access(&state, &headers, Permission::ManageAgents).await?;
+    let org = state
+        .repository
+        .find_organization_by_clerk_id(&clerk_org_id)
+        .await?;
+    let account = state.repository.find_account(request.account_id).await?;
+    if account.organization_id != org.id {
+        return Err(AppError::Forbidden(
+            "account does not belong to this organization".to_string(),
+        ));
+    }
     let agent = state.repository.create_agent(request).await?;
     Ok(Json(agent))
 }
