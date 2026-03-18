@@ -53,6 +53,8 @@ Schema setup is handled through SQL migrations in [`migrations/`](./migrations).
 cargo run
 ```
 
+On startup, the `daphne` app emits `bugfixes::local::info!("Server running on port ...")`. The library's local logger uses stdout locally and avoids remote bugfixes ingestion for startup noise.
+
 Common repo tasks:
 
 ```bash
