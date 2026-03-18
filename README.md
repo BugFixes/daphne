@@ -33,6 +33,8 @@ This repository is a fresh implementation. The abandoned Go prototype in `../cel
 - `POST /v1/logs/retention/run` summarizes and deletes logs older than the configured retention window.
 - `GET /healthz` returns a basic health response.
 
+Provider configuration and secret-handling design for upcoming dashboard and integration work is documented in [`docs/provider-configuration.md`](docs/provider-configuration.md).
+
 The current providers are local stubs for:
 
 - ticketing: `jira`, `github`, `linear`, `tracklines`
