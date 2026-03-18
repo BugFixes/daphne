@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use bugfixes::{
+use daphne::{
     ai::AiRegistry,
     api,
     config::Config,
@@ -13,10 +13,11 @@ use bugfixes::{
 };
 
 #[tokio::main]
-async fn main() -> bugfixes::AppResult<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+async fn main() -> daphne::AppResult<()> {
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let config = Config::from_env()?;
     let repository = Arc::new(Repository::connect(&config).await?);
@@ -40,8 +41,8 @@ async fn main() -> bugfixes::AppResult<()> {
 
     let app = api::router(repository, intake_service);
     let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
-
-    tracing::info!("bugfix.es listening on {}", config.bind_address);
+    let listen_address = listener.local_addr()?;
+    let _ = bugfixes::local::info!("Server running on port {}", listen_address.port());
 
     axum::serve(listener, app).await?;
     Ok(())
