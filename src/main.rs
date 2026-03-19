@@ -15,6 +15,7 @@ use daphne::{
 
 #[tokio::main]
 async fn main() -> daphne::AppResult<()> {
+    let _ = dotenvy::dotenv();
     logging::init_global();
 
     let config = Config::from_env()?;
