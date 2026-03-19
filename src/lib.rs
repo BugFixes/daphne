@@ -3,6 +3,7 @@ pub mod api;
 pub mod config;
 pub mod domain;
 pub mod feature_flags;
+pub mod logging;
 pub mod migrations;
 pub mod notifications;
 pub mod policy;
