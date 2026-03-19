@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::{
     AppError, AppResult,
     domain::{Account, Bug, Ticket, TicketPriority, TicketProvider},
+    logging,
 };
 
 pub mod github;
@@ -131,30 +132,22 @@ fn build_stub_remote_ticket(provider: TicketProvider, bug_id: uuid::Uuid) -> Rem
 }
 
 fn log_stub_ticket_creation(provider: TicketProvider, request: &TicketCreateRequest) {
-    tracing::info!(
-        provider = %provider,
-        bug_id = %request.bug.id,
-        priority = %request.priority,
-        "created stub remote ticket"
-    );
+    logging::info(format!(
+        "created stub remote ticket provider={} bug_id={} priority={}",
+        provider, request.bug.id, request.priority
+    ));
 }
 
 fn log_stub_ticket_comment(provider: TicketProvider, request: &TicketCommentRequest) {
-    tracing::info!(
-        provider = %provider,
-        ticket_id = %request.ticket.id,
-        remote_id = %request.ticket.remote_id,
-        comment = %request.comment,
-        "added stub ticket comment"
-    );
+    logging::info(format!(
+        "added stub ticket comment provider={} ticket_id={} remote_id={} comment={}",
+        provider, request.ticket.id, request.ticket.remote_id, request.comment
+    ));
 }
 
 fn log_stub_ticket_priority(provider: TicketProvider, request: &TicketPriorityRequest) {
-    tracing::info!(
-        provider = %provider,
-        ticket_id = %request.ticket.id,
-        remote_id = %request.ticket.remote_id,
-        priority = %request.priority,
-        "updated stub ticket priority"
-    );
+    logging::info(format!(
+        "updated stub ticket priority provider={} ticket_id={} remote_id={} priority={}",
+        provider, request.ticket.id, request.ticket.remote_id, request.priority
+    ));
 }

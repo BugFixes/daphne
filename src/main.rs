@@ -5,6 +5,7 @@ use daphne::{
     api,
     config::Config,
     feature_flags::build_feature_flags,
+    logging,
     notifications::NotificationRegistry,
     policy::build_policy_engine,
     repository::Repository,
@@ -14,10 +15,7 @@ use daphne::{
 
 #[tokio::main]
 async fn main() -> daphne::AppResult<()> {
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    logging::init_global();
 
     let config = Config::from_env()?;
     let repository = Arc::new(Repository::connect(&config).await?);

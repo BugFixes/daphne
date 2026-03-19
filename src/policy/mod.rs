@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::{AppError, AppResult, config::Config};
+use crate::{AppError, AppResult, config::Config, logging};
 
 #[cfg(test)]
 mod tests;
@@ -207,7 +207,9 @@ impl Policy2PolicyEngine {
         let response = match self.client.post(&self.endpoint).json(&payload).send().await {
             Ok(response) => response,
             Err(error) => {
-                tracing::warn!(%error, "policy2 request failed, falling back to local policy");
+                logging::warn(format!(
+                    "policy2 request failed, falling back to local policy: {error}"
+                ));
                 return Err(AppError::Internal(format!(
                     "policy2 request failed: {error}"
                 )));
@@ -244,7 +246,9 @@ impl PolicyEngine for Policy2PolicyEngine {
         match self.evaluate(CREATE_TICKET_RULE, input).await {
             Ok(result) => Ok(result),
             Err(error) => {
-                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                logging::warn(format!(
+                    "policy2 evaluation failed, falling back to local policy: {error}"
+                ));
                 self.fallback.should_create_ticket(input).await
             }
         }
@@ -254,7 +258,9 @@ impl PolicyEngine for Policy2PolicyEngine {
         match self.evaluate(ESCALATE_REPEAT_RULE, input).await {
             Ok(result) => Ok(result),
             Err(error) => {
-                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                logging::warn(format!(
+                    "policy2 evaluation failed, falling back to local policy: {error}"
+                ));
                 self.fallback.should_escalate_repeat(input).await
             }
         }
@@ -267,7 +273,9 @@ impl PolicyEngine for Policy2PolicyEngine {
         match self.evaluate(SEND_NOTIFICATION_RULE, input).await {
             Ok(result) => Ok(result),
             Err(error) => {
-                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                logging::warn(format!(
+                    "policy2 evaluation failed, falling back to local policy: {error}"
+                ));
                 self.fallback.should_send_notification(input).await
             }
         }
@@ -277,7 +285,9 @@ impl PolicyEngine for Policy2PolicyEngine {
         match self.evaluate(USE_AI_RULE, input).await {
             Ok(result) => Ok(result),
             Err(error) => {
-                tracing::warn!(%error, "policy2 evaluation failed, falling back to local policy");
+                logging::warn(format!(
+                    "policy2 evaluation failed, falling back to local policy: {error}"
+                ));
                 self.fallback.should_use_ai(input).await
             }
         }

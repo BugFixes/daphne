@@ -6,6 +6,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     AppError, AppResult,
     domain::{Account, Bug, NotificationProvider, Severity},
+    logging,
 };
 
 pub mod resend;
@@ -85,12 +86,8 @@ pub fn build_notification_message(account: &Account, bug: &Bug, when: DateTime<U
 }
 
 fn log_stub_notification(provider: NotificationProvider, request: &NotificationRequest) {
-    tracing::info!(
-        provider = %provider,
-        account_id = %request.account.id,
-        bug_id = %request.bug.id,
-        severity = %request.severity,
-        "sent stub notification: {}",
-        request.message
-    );
+    logging::info(format!(
+        "sent stub notification provider={} account_id={} bug_id={} severity={} message={}",
+        provider, request.account.id, request.bug.id, request.severity, request.message
+    ));
 }

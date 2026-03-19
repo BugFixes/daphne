@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use refinery::{config::Config as MigrationConfig, embed_migrations};
 
-use crate::{AppError, AppResult};
+use crate::{AppError, AppResult, logging};
 
 mod embedded {
     use super::embed_migrations;
@@ -37,12 +37,12 @@ fn is_postgres_url(database_url: &str) -> bool {
 
 fn log_report(report: &refinery::Report) {
     if report.applied_migrations().is_empty() {
-        tracing::info!("database migrations already up to date");
+        logging::info("database migrations already up to date");
     } else {
-        tracing::info!(
-            applied = report.applied_migrations().len(),
-            "applied database migrations"
-        );
+        logging::info(format!(
+            "applied database migrations count={}",
+            report.applied_migrations().len()
+        ));
     }
 }
 

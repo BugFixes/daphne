@@ -55,6 +55,8 @@ cargo run
 
 On startup, the `daphne` app emits `bugfixes::local::info!("Server running on port ...")`. The library's local logger uses stdout locally and avoids remote bugfixes ingestion for startup noise.
 
+Application logs now flow through the Bugfixes logger as well. If `BUGFIXES_AGENT_KEY` or `BUGFIXES_AGENT_SECRET` is unset, startup forces local-only logging so the service still emits logs to stdout without requiring remote Bugfixes credentials.
+
 Common repo tasks:
 
 ```bash
@@ -76,6 +78,11 @@ Environment variables:
 
 - `BUGFIXES_BIND_ADDRESS` default: `127.0.0.1:3000`
 - `BUGFIXES_DATABASE_URL` default: `postgres://postgres:postgres@127.0.0.1:5432/bugfixes`
+- `BUGFIXES_AGENT_KEY` optional remote Bugfixes log credential
+- `BUGFIXES_AGENT_SECRET` optional remote Bugfixes log credential
+- `BUGFIXES_LOG_LEVEL` optional minimum level for remote Bugfixes reporting
+- `BUGFIXES_LOCAL_ONLY` optional explicit local-only logging override
+- `BUGFIXES_SERVER` default: `https://api.bugfix.es/v1`
 - `BUGFIXES_FEATURE_FLAGS_PROVIDER` default: `local`
 - `BUGFIXES_POLICY_PROVIDER` default: `local`
 - `BUGFIXES_POLICY2_ENGINE_URL` default: `https://api.policy2.net/run`
