@@ -34,3 +34,46 @@ fn logger_config() -> bugfixes::Config {
 
     config
 }
+
+#[cfg(test)]
+mod tests {
+    use super::logger_config;
+
+    #[test]
+    fn defaults_to_local_only_without_bugfixes_credentials() {
+        temp_env::with_vars(
+            [
+                ("BUGFIXES_AGENT_KEY", None),
+                ("BUGFIXES_AGENT_SECRET", None),
+                ("BUGFIXES_LOCAL_ONLY", Some("false")),
+            ],
+            || {
+                let config = logger_config();
+
+                assert!(config.local_only);
+            },
+        );
+    }
+
+    #[test]
+    fn preserves_remote_logging_when_bugfixes_credentials_exist() {
+        temp_env::with_vars(
+            [
+                ("BUGFIXES_AGENT_KEY", Some("agent-key")),
+                ("BUGFIXES_AGENT_SECRET", Some("agent-secret")),
+                ("BUGFIXES_LOCAL_ONLY", Some("false")),
+                ("BUGFIXES_LOG_LEVEL", Some("warn")),
+                ("BUGFIXES_SERVER", Some("https://bugfixes.example/v1")),
+            ],
+            || {
+                let config = logger_config();
+
+                assert!(!config.local_only);
+                assert_eq!(config.agent_key, "agent-key");
+                assert_eq!(config.agent_secret, "agent-secret");
+                assert_eq!(config.log_level, "warn");
+                assert_eq!(config.server, "https://bugfixes.example/v1");
+            },
+        );
+    }
+}
