@@ -288,9 +288,9 @@ dependencies = [
 
 [[package]]
 name = "bugfixes"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c183d4def8df2a5e6917750d3e772ee7ef6dcdfbd4202f75434eee2a6ed79037"
+checksum = "b4793e4367a3581a49db0c7da75172560487534003d18bde1becf872a756b83d"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
