@@ -31,6 +31,6 @@ tower-http = { version = "0.6.8", features = ["cors"] }
 [dev-dependencies]
 serial_test = "3.2.0"
 temp-env = "0.3"
-testcontainers = { version = "0.27.1", features = ["blocking"] }
+testcontainers = { version = "0.27.2", features = ["blocking"] }
 testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 tower = { version = "0.5", features = ["util"] }
