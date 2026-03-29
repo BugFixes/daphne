@@ -288,12 +288,13 @@ dependencies = [
 
 [[package]]
 name = "bugfixes"
-version = "0.2.2"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4793e4367a3581a49db0c7da75172560487534003d18bde1becf872a756b83d"
+checksum = "2fff593041319b2caa76dd3f309896a99e492fab0f96a4a3cb2bb09e2bde3a7c"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
+ "time",
  "tokio",
 ]
 
@@ -1638,6 +1639,15 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
  "libm",
+]
+
+[[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -3197,7 +3207,9 @@ checksum = "743bd48c283afc0388f9b8827b976905fb217ad9e647fae3a379a9283c4def2c"
 dependencies = [
  "deranged",
  "itoa",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",
