@@ -36,13 +36,13 @@ pub struct FlagsGgFeatureFlags {
 impl FlagsGgFeatureFlags {
     pub fn from_config(config: &Config) -> AppResult<Self> {
         let project_id = config.flagsgg_project_id.clone().ok_or_else(|| {
-            AppError::Validation("BUGFIXES_FLAGSGG_PROJECT_ID is required".to_string())
+            AppError::Validation("FLAGSGG_PROJECT_ID is required".to_string())
         })?;
         let agent_id = config.flagsgg_agent_id.clone().ok_or_else(|| {
-            AppError::Validation("BUGFIXES_FLAGSGG_AGENT_ID is required".to_string())
+            AppError::Validation("FLAGSGG_AGENT_ID is required".to_string())
         })?;
         let environment_id = config.flagsgg_environment_id.clone().ok_or_else(|| {
-            AppError::Validation("BUGFIXES_FLAGSGG_ENVIRONMENT_ID is required".to_string())
+            AppError::Validation("FLAGSGG_ENVIRONMENT_ID is required".to_string())
         })?;
 
         let client = flags_rs::Client::builder()
@@ -77,14 +77,12 @@ impl FeatureFlagsClient for FlagsGgFeatureFlags {
 }
 
 pub fn build_feature_flags(config: &Config) -> AppResult<Arc<dyn FeatureFlagsClient>> {
-    match config.feature_flags_provider.as_str() {
-        "local" => Ok(Arc::new(LocalFeatureFlags::new(
+    if cfg!(feature = "flagsgg") {
+        build_flagsgg_feature_flags(config)
+    } else {
+        Ok(Arc::new(LocalFeatureFlags::new(
             config.disabled_features.clone(),
-        ))),
-        "flagsgg" => build_flagsgg_feature_flags(config),
-        _ => Err(AppError::Validation(
-            "BUGFIXES_FEATURE_FLAGS_PROVIDER must be one of: local, flagsgg".to_string(),
-        )),
+        )))
     }
 }
 
@@ -96,7 +94,7 @@ fn build_flagsgg_feature_flags(config: &Config) -> AppResult<Arc<dyn FeatureFlag
 #[cfg(not(feature = "flagsgg"))]
 fn build_flagsgg_feature_flags(_config: &Config) -> AppResult<Arc<dyn FeatureFlagsClient>> {
     Err(AppError::Validation(
-        "BUGFIXES_FEATURE_FLAGS_PROVIDER=flagsgg requires the `flagsgg` cargo feature".to_string(),
+        "FEATURE_FLAGS_PROVIDER=flagsgg requires the `flagsgg` cargo feature".to_string(),
     ))
 }
 

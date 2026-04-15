@@ -119,11 +119,13 @@ pub trait PolicyEngine: Send + Sync {
 }
 
 pub fn build_policy_engine(config: &Config) -> AppResult<Arc<dyn PolicyEngine>> {
-    match config.policy_provider.as_str() {
+    let provider =
+        std::env::var("POLICY_PROVIDER").unwrap_or_else(|_| "local".to_string());
+    match provider.as_str() {
         "local" => Ok(Arc::new(LocalPolicyEngine)),
         "policy2" => Ok(Arc::new(Policy2PolicyEngine::from_config(config)?)),
         _ => Err(AppError::Validation(
-            "BUGFIXES_POLICY_PROVIDER must be one of: local, policy2".to_string(),
+            "POLICY_PROVIDER must be one of: local, policy2".to_string(),
         )),
     }
 }

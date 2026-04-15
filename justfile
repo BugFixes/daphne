@@ -1,7 +1,6 @@
 set shell := ["bash", "-cu"]
 
-toolchain := "1.93.0"
-cargo := env("HOME") + "/.cargo/bin/rustup run " + toolchain + " cargo"
+cargo := "cargo"
 
 default:
     @just --list
