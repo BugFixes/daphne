@@ -145,6 +145,51 @@ async fn manages_organization_memberships() {
 
 #[tokio::test]
 #[serial]
+async fn create_organization_reuses_clerk_org_and_adds_missing_owner_membership() {
+    let config = test_config_with_disabled_features(HashSet::new()).await;
+    let repository = Repository::connect(&config).await.expect("repository");
+    reset_database().await;
+
+    let first = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "Acme".to_string(),
+            clerk_org_id: Some("org_shared_acme".to_string()),
+            owner_clerk_user_id: "user_owner_one".to_string(),
+            owner_name: "Owner One".to_string(),
+        })
+        .await
+        .expect("first organization");
+
+    let second = repository
+        .create_organization(CreateOrganizationRequest {
+            name: "Acme Duplicate".to_string(),
+            clerk_org_id: Some("org_shared_acme".to_string()),
+            owner_clerk_user_id: "user_owner_two".to_string(),
+            owner_name: "Owner Two".to_string(),
+        })
+        .await
+        .expect("second organization");
+
+    assert_eq!(first.organization.id, second.organization.id);
+
+    let first_user_orgs = repository
+        .list_organizations_for_user("user_owner_one")
+        .await
+        .expect("first user orgs");
+    let second_user_orgs = repository
+        .list_organizations_for_user("user_owner_two")
+        .await
+        .expect("second user orgs");
+
+    assert_eq!(first_user_orgs.len(), 1);
+    assert_eq!(second_user_orgs.len(), 1);
+    assert_eq!(first_user_orgs[0].organization.id, second.organization.id);
+    assert_eq!(second_user_orgs[0].organization.id, second.organization.id);
+    assert_eq!(second_user_orgs[0].membership.role, OrganizationRole::Owner);
+}
+
+#[tokio::test]
+#[serial]
 async fn scopes_dashboard_repository_queries_to_clerk_org() {
     let config = test_config_with_disabled_features(HashSet::new()).await;
     let repository = Repository::connect(&config).await.expect("repository");

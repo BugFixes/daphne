@@ -94,17 +94,7 @@ impl Repository {
     ) -> AppResult<OrganizationAccess> {
         request.validate()?;
         let now = Utc::now();
-        let organization = Organization {
-            id: Uuid::new_v4(),
-            name: request.name.trim().to_string(),
-            clerk_org_id: request.clerk_org_id,
-            plan_tier: OrganizationPlanTier::Single,
-            created_at: now,
-            updated_at: now,
-        };
         let mut tx = self.pool.begin().await?;
-
-        insert_organization_tx(&mut tx, &organization).await?;
         let user = find_or_create_user_tx(
             &mut tx,
             &request.owner_clerk_user_id,
@@ -112,15 +102,47 @@ impl Repository {
             now,
         )
         .await?;
-        let membership = Membership {
-            id: Uuid::new_v4(),
-            organization_id: organization.id,
-            user_id: user.id,
-            role: OrganizationRole::Owner,
-            created_at: now,
-            updated_at: now,
+
+        let organization = match request.clerk_org_id.as_deref() {
+            Some(clerk_org_id) => find_organization_by_clerk_id_tx(&mut tx, clerk_org_id)
+                .await?
+                .unwrap_or(Organization {
+                    id: Uuid::new_v4(),
+                    name: request.name.trim().to_string(),
+                    clerk_org_id: request.clerk_org_id,
+                    plan_tier: OrganizationPlanTier::Single,
+                    created_at: now,
+                    updated_at: now,
+                }),
+            None => Organization {
+                id: Uuid::new_v4(),
+                name: request.name.trim().to_string(),
+                clerk_org_id: None,
+                plan_tier: OrganizationPlanTier::Single,
+                created_at: now,
+                updated_at: now,
+            },
         };
-        insert_membership_tx(&mut tx, &membership).await?;
+
+        if find_organization_tx(&mut tx, organization.id).await.is_err() {
+            insert_organization_tx(&mut tx, &organization).await?;
+        }
+
+        let membership = match find_membership_for_user_id_tx(&mut tx, organization.id, user.id).await? {
+            Some(existing_membership) => existing_membership,
+            None => {
+                let membership = Membership {
+                    id: Uuid::new_v4(),
+                    organization_id: organization.id,
+                    user_id: user.id,
+                    role: OrganizationRole::Owner,
+                    created_at: now,
+                    updated_at: now,
+                };
+                insert_membership_tx(&mut tx, &membership).await?;
+                membership
+            }
+        };
 
         tx.commit().await?;
 
@@ -1559,6 +1581,20 @@ async fn find_organization_tx(
     .ok_or_else(|| AppError::NotFound(format!("organization {organization_id}")))?;
 
     row.try_into()
+}
+
+async fn find_organization_by_clerk_id_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    clerk_org_id: &str,
+) -> AppResult<Option<Organization>> {
+    let row = sqlx::query_as::<_, OrganizationRow>(
+        "SELECT id, name, clerk_org_id, plan_tier, created_at, updated_at FROM organizations WHERE clerk_org_id = $1",
+    )
+    .bind(clerk_org_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(TryInto::try_into).transpose()
 }
 
 async fn insert_project_tx(tx: &mut Transaction<'_, Postgres>, project: &Project) -> AppResult<()> {

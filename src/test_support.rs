@@ -24,10 +24,8 @@ pub(crate) async fn test_config_with_disabled_features(
     disabled_features: HashSet<String>,
 ) -> Config {
     Config {
-        bind_address: "127.0.0.1:0".to_string(),
+        http_port: "0".to_string(),
         database_url: test_database_url().await.to_string(),
-        feature_flags_provider: "local".to_string(),
-        policy_provider: "local".to_string(),
         policy2_engine_url: "https://api.policy2.net/run".to_string(),
         notification_cooldown_minutes: 0,
         log_retention_days: 30,

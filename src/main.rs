@@ -39,7 +39,7 @@ async fn main() -> daphne::AppResult<()> {
     ));
 
     let app = api::router(repository, intake_service);
-    let listener = tokio::net::TcpListener::bind(&config.bind_address).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", config.http_port)).await?;
     let listen_address = listener.local_addr()?;
     let _ = bugfixes::local::info!("Server running on port {}", listen_address.port());
 
